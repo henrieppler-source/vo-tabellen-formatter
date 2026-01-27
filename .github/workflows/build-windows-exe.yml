@@ -1,0 +1,57 @@
+name: Build Windows EXE + Release ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install openpyxl pyinstaller
+
+      - name: Build EXE
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed ^
+            --name "VO-Tabellen-Formatter" ^
+            --add-data "Layouts;Layouts" ^
+            vo_tabellen_gui.py
+
+      - name: Prepare release folder
+        run: |
+          mkdir release
+          copy dist\VO-Tabellen-Formatter.exe release\
+          xcopy Layouts release\Layouts\ /E /I /Y
+
+      - name: Create ZIP
+        run: |
+          powershell -Command "Compress-Archive -Path release\* -DestinationPath VO-Tabellen-Formatter.zip -Force"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VO-Tabellen-Formatter
+          path: VO-Tabellen-Formatter.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: VO-Tabellen-Formatter.zip
