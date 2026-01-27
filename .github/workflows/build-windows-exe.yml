@@ -28,6 +28,7 @@ jobs:
           pip install openpyxl pyinstaller
 
       - name: Build EXE
+        shell: cmd
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed ^
             --name "VO-Tabellen-Formatter" ^
