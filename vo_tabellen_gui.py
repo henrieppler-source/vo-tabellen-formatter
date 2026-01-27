@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import re
 from datetime import datetime
@@ -12,11 +13,9 @@ from tkinter import ttk, filedialog, messagebox
 
 
 # ============================================================
-# FESTE VERZEICHNISSE (wie vorgegeben)
+# Konstanten / Regeln
 # ============================================================
 
-PROTOKOLL_DIR = r"L:\Abteilung5\sg52\50_INSO\1_Erhebungen\11_Insolvenzstatistiken\110_52411_BEANTRAGTE\1101_Monatsabschluss\Protokolle"
-LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
 RAW_SHEET_NAMES = {
@@ -40,9 +39,30 @@ PREFIX_TO_TABLE = {
     "Tabelle-5-Land": 5,
 }
 
-# später:
-# TAB8_PREFIXES = ["25_Tab8_", "26_Tab8_", "27_Tab8_", "28_Tab8_"]
-# TAB9_PREFIXES = ["29_Tab9_", "30_Tab9_", "31_Tab9_", "32_Tab9_"]
+GER_MONTHS = (
+    "Januar", "Februar", "März", "Maerz", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember"
+)
+PERIOD_TOKENS = ("Quartal", "Halbjahr", "Jahr", "Jahres", "Q1", "Q2", "Q3", "Q4", "H1", "H2", "JJ")
+
+
+# ============================================================
+# Pfad-Helfer (EXE + Script)
+# ============================================================
+
+def app_base_dir() -> str:
+    """
+    Basisverzeichnis der App:
+    - Script: Ordner der .py
+    - PyInstaller onefile: Ordner der .exe
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def normalize_dir(p: str) -> str:
+    return os.path.normpath(p.strip().strip('"').strip("'"))
 
 
 # ============================================================
@@ -50,12 +70,10 @@ PREFIX_TO_TABLE = {
 # ============================================================
 
 class Logger:
-    def __init__(self):
-        # PROTOKOLL_DIR kommt normalerweise aus dem GUI.
-        # Wenn leer, loggen wir lokal neben der EXE (Unterordner 'Protokolle').
-        log_dir = PROTOKOLL_DIR.strip() if isinstance(PROTOKOLL_DIR, str) else ""
+    def __init__(self, log_dir: str):
+        log_dir = normalize_dir(log_dir) if isinstance(log_dir, str) else ""
         if not log_dir:
-            log_dir = os.path.join(os.getcwd(), "Protokolle")
+            log_dir = os.path.join(app_base_dir(), "Protokolle")
         os.makedirs(log_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         self.path = os.path.join(log_dir, f"vo_tabellen_{ts}.log")
@@ -84,13 +102,6 @@ def is_numeric_like(v):
         s2 = s.replace(".", "").replace(",", "").replace(" ", "")
         return s2.isdigit()
     return False
-
-
-GER_MONTHS = (
-    "Januar", "Februar", "März", "Maerz", "April", "Mai", "Juni",
-    "Juli", "August", "September", "Oktober", "November", "Dezember"
-)
-PERIOD_TOKENS = ("Quartal", "Halbjahr", "Jahr", "Jahres", "Q1", "Q2", "Q3", "Q4", "H1", "H2", "JJ")
 
 
 def find_period_text(ws, search_rows=30):
@@ -146,7 +157,6 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     if not copyright_row:
         return
 
-    # andere Stand:-Zeilen entfernen
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             v = ws.cell(row=r, column=c).value
@@ -156,7 +166,6 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     if not stand_text:
         return
 
-    # Stand-Spalte finden (oder letzte Spalte)
     stand_col = None
     for c in range(1, max_col + 1):
         v = ws.cell(row=copyright_row, column=c).value
@@ -193,6 +202,7 @@ def format_numeric_cells(ws, skip_cols=None):
     """
     Ganzzahlen: Tausendertrennzeichen = Leerzeichen, keine Dezimalstellen
     Negative: "- " vorangestellt
+    0 bleibt 0
     """
     if skip_cols is None:
         skip_cols = set()
@@ -231,10 +241,6 @@ def format_percent_column(ws, col_index: int):
 
 
 def detect_data_and_footer_tab1(sheet):
-    """
-    Tabelle 1: Datenstart = erste Zeile mit Zahl ab Spalte B irgendwo
-    Fußnotenstart = erste Zeile in A mit '-'
-    """
     max_row = sheet.max_row
     first_data = None
     for r in range(1, max_row + 1):
@@ -257,9 +263,6 @@ def detect_data_and_footer_tab1(sheet):
 
 
 def detect_data_and_footer_tab2_3(sheet):
-    """
-    Tabelle 2/3: Datenstart über numerische Werte ab Spalte C (B ist Text)
-    """
     max_row = sheet.max_row
     first_data = None
     for r in range(1, max_row + 1):
@@ -318,19 +321,19 @@ def build_table1_workbook(raw_path, layout_path, internal_layout: bool):
 
     update_footer_with_stand_and_copyright(ws_out, stand_text)
 
-    # Tabelle 1: Spalte I (9) = Prozentwerte
+    # Tabelle 1: Spalte I = Prozent
     format_percent_column(ws_out, 9)
     format_numeric_cells(ws_out, skip_cols={9})
 
     return wb_out
 
 
-def process_table1_file(raw_path, output_dir, logger: Logger):
+def process_table1_file(raw_path, output_dir, layout_dir, logger: Logger):
     base = os.path.splitext(os.path.basename(raw_path))[0]
     is_jj = "-JJ" in base
 
-    layout_g = os.path.join(LAYOUT_DIR, TEMPLATES[1]["ext"])
-    layout_i = os.path.join(LAYOUT_DIR, TEMPLATES[1]["int"])
+    layout_g = os.path.join(layout_dir, TEMPLATES[1]["ext"])
+    layout_i = os.path.join(layout_dir, TEMPLATES[1]["int"])
 
     wb_i = build_table1_workbook(raw_path, layout_i, internal_layout=True)
     out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
@@ -342,7 +345,7 @@ def process_table1_file(raw_path, output_dir, logger: Logger):
         ws.cell(row=1, column=1).value = None
 
         fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-        mark_cells_with_1_or_2(ws, 7, fill)  # Tabelle 1: Spalte G markieren
+        mark_cells_with_1_or_2(ws, 7, fill)  # G
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_i.save(out_g)
@@ -368,17 +371,16 @@ def build_table2_3_workbook(table_no, raw_path, layout_path, internal_layout: bo
     wb_out = openpyxl.load_workbook(layout_path)
     ws_out = wb_out[wb_out.sheetnames[0]]
 
-    # Kopf/Bezugszeitraum
     if internal_layout:
         ws_out.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
         ws_out.cell(row=6, column=1).value = period_text
     else:
         ws_out.cell(row=3, column=1).value = period_text
         if table_no == 2:
-            # alte Monatszeile raus
+            # Zeile 4 (z.B. "November ...") leer
             ws_out.cell(row=4, column=1).value = None
 
-    # Daten kopieren: ab Spalte B überschreiben (damit B nicht aus Layout bleibt)
+    # Daten kopieren: ab Spalte B, damit Spalte B nicht aus Layout stehenbleibt
     START_COL_COPY = 2
     is_sec = get_merged_secondary_checker(ws_out)
 
@@ -397,19 +399,19 @@ def build_table2_3_workbook(table_no, raw_path, layout_path, internal_layout: bo
 
     update_footer_with_stand_and_copyright(ws_out, stand_text)
 
-    # Tabelle 2/3: Spalte G (7) = Prozent
+    # Tabelle 2/3: Spalte G = Prozent
     format_percent_column(ws_out, 7)
     format_numeric_cells(ws_out, skip_cols={7})
 
     return wb_out
 
 
-def process_table2_or_3_file(table_no, raw_path, output_dir, logger: Logger):
+def process_table2_or_3_file(table_no, raw_path, output_dir, layout_dir, logger: Logger):
     base = os.path.splitext(os.path.basename(raw_path))[0]
     is_jj = "-JJ" in base
 
-    layout_g = os.path.join(LAYOUT_DIR, TEMPLATES[table_no]["ext"])
-    layout_i = os.path.join(LAYOUT_DIR, TEMPLATES[table_no]["int"])
+    layout_g = os.path.join(layout_dir, TEMPLATES[table_no]["ext"])
+    layout_i = os.path.join(layout_dir, TEMPLATES[table_no]["int"])
 
     wb_i = build_table2_3_workbook(table_no, raw_path, layout_i, internal_layout=True)
     out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
@@ -421,7 +423,7 @@ def process_table2_or_3_file(table_no, raw_path, output_dir, logger: Logger):
         ws.cell(row=1, column=1).value = None
 
         fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-        mark_cells_with_1_or_2(ws, 5, fill)  # Tabelle 2/3: Spalte E markieren
+        mark_cells_with_1_or_2(ws, 5, fill)  # E
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_i.save(out_g)
@@ -447,7 +449,6 @@ def build_table5_workbook(raw_path, layout_path, internal_layout: bool, is_jj: b
     wb_out = openpyxl.load_workbook(layout_path)
     max_row_raw = ws_raw.max_row
 
-    # Blockstart ("Bayern 1)"..)
     starts = []
     for r in range(1, max_row_raw + 1):
         v = ws_raw.cell(row=r, column=2).value
@@ -466,7 +467,6 @@ def build_table5_workbook(raw_path, layout_path, internal_layout: bool, is_jj: b
     def fill_sheet_from_block(ws_out, start_row, end_row):
         is_sec = get_merged_secondary_checker(ws_out)
 
-        # Datenstart im Layout: erste Zeile mit Zahl in Spalte C
         first_data_out = None
         for r in range(1, ws_out.max_row + 1):
             if is_numeric_like(ws_out.cell(row=r, column=3).value):
@@ -475,8 +475,6 @@ def build_table5_workbook(raw_path, layout_path, internal_layout: bool, is_jj: b
         if first_data_out is None:
             return
 
-        # INTERN: immer C..J
-        # _g:     JJ -> C..J, sonst C..H und I/J leer
         if internal_layout:
             cols = range(3, 11)  # C..J
         else:
@@ -493,7 +491,6 @@ def build_table5_workbook(raw_path, layout_path, internal_layout: bool, is_jj: b
             out_r += 1
 
         if (not internal_layout) and (not is_jj):
-            # I/J sicher leer lassen
             for rr in range(first_data_out, out_r):
                 for cc in (9, 10):
                     if not is_sec(rr, cc):
@@ -514,19 +511,19 @@ def build_table5_workbook(raw_path, layout_path, internal_layout: bool, is_jj: b
         fill_sheet_from_block(ws, start, end)
         update_footer_with_stand_and_copyright(ws, stand_text)
 
-        # Tabelle 5: Spalte H (8) = Prozent
+        # Tabelle 5: Spalte H = Prozent
         format_percent_column(ws, 8)
         format_numeric_cells(ws, skip_cols={8})
 
     return wb_out
 
 
-def process_table5_file(raw_path, output_dir, logger: Logger):
+def process_table5_file(raw_path, output_dir, layout_dir, logger: Logger):
     base = os.path.splitext(os.path.basename(raw_path))[0]
     is_jj = "-JJ" in base
 
-    layout_g = os.path.join(LAYOUT_DIR, TEMPLATES[5]["ext"])
-    layout_i = os.path.join(LAYOUT_DIR, TEMPLATES[5]["int"])
+    layout_g = os.path.join(layout_dir, TEMPLATES[5]["ext"])
+    layout_i = os.path.join(layout_dir, TEMPLATES[5]["int"])
 
     wb_i = build_table5_workbook(raw_path, layout_i, internal_layout=True, is_jj=is_jj)
     out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
@@ -537,7 +534,7 @@ def process_table5_file(raw_path, output_dir, logger: Logger):
         fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
         for ws in wb_i.worksheets:
             ws.cell(row=1, column=1).value = None
-            mark_cells_with_1_or_2(ws, 6, fill)  # Tabelle 5: Spalte F markieren
+            mark_cells_with_1_or_2(ws, 6, fill)  # F
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_i.save(out_g)
@@ -555,22 +552,18 @@ def process_table5_file(raw_path, output_dir, logger: Logger):
 
 def find_raw_files(input_dir):
     """
-    Nur Rohdateien, die mit Tabelle-1/2/3/5-Land beginnen.
-    _g.xlsx und _INTERN.xlsx werden ignoriert.
+    Rohdateien: Tabelle-1/2/3/5-Land*.xlsx
+    _g.xlsx und _INTERN.xlsx ignorieren
     """
     files = []
     for prefix in PREFIX_TO_TABLE.keys():
-        files.extend(glob.glob(os.path.join(input_dir, f"{prefix}_*.xlsx")))
+        files.extend(glob.glob(os.path.join(input_dir, f"{prefix}*.xlsx")))
     files = sorted(set(files))
     files = [f for f in files if not f.endswith("_g.xlsx") and not f.endswith("_INTERN.xlsx")]
     return files
 
 
 def ensure_output_run_folder(base_out_dir: str, input_folder: str) -> str:
-    """
-    base_out_dir = z.B. ...\2025\2025-12
-    Ausgabe     = base_out_dir\VÖ-Tabellen\<Eingangsordnername>
-    """
     vo_base = os.path.join(base_out_dir, "VÖ-Tabellen")
     os.makedirs(vo_base, exist_ok=True)
 
@@ -579,18 +572,26 @@ def ensure_output_run_folder(base_out_dir: str, input_folder: str) -> str:
     return run_dir
 
 
+def assert_layouts_exist(layout_dir: str):
+    missing = []
+    for t in (1, 2, 3, 5):
+        for k in ("ext", "int"):
+            p = os.path.join(layout_dir, TEMPLATES[t][k])
+            if not os.path.exists(p):
+                missing.append(p)
+    if missing:
+        raise FileNotFoundError("Layout-Dateien fehlen:\n" + "\n".join(missing))
+
+
 # ============================================================
-# GUI
+# Verarbeitung (pro Job-Ordner)
 # ============================================================
 
-def choose_dir(entry: ttk.Entry):
-    d = filedialog.askdirectory()
-    if d:
-        entry.delete(0, tk.END)
-        entry.insert(0, d)
+def run_for_one_input_dir(input_dir: str, base_out_dir: str, layout_dir: str, logger: Logger, status_var: tk.StringVar):
+    input_dir = normalize_dir(input_dir)
+    base_out_dir = normalize_dir(base_out_dir)
+    layout_dir = normalize_dir(layout_dir)
 
-
-def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, status_var: tk.StringVar):
     if not os.path.isdir(input_dir):
         logger.log(f"[SKIP] Eingangspfad existiert nicht: {input_dir}")
         return
@@ -600,19 +601,13 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
     logger.log(f"--- Ausgabe: {out_dir}")
 
     files = find_raw_files(input_dir)
+    logger.log(f"[SCAN] {len(files)} Datei(en) gefunden (relevant).")
+
     if not files:
         logger.log(f"[INFO] Keine passenden Rohdateien gefunden in: {input_dir}")
         return
 
-    # Layout-Existenz prüfen (für 1/2/3/5)
-    missing_layouts = []
-    for t in (1, 2, 3, 5):
-        for k in ("ext", "int"):
-            p = os.path.join(LAYOUT_DIR, TEMPLATES[t][k])
-            if not os.path.exists(p):
-                missing_layouts.append(p)
-    if missing_layouts:
-        raise FileNotFoundError("Layout-Dateien fehlen:\n" + "\n".join(missing_layouts))
+    assert_layouts_exist(layout_dir)
 
     for f in files:
         fname = os.path.basename(f)
@@ -630,41 +625,51 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
         logger.log(f"[START] {fname}")
 
         if table_no == 1:
-            process_table1_file(f, out_dir, logger)
+            process_table1_file(f, out_dir, layout_dir, logger)
         elif table_no in (2, 3):
-            process_table2_or_3_file(table_no, f, out_dir, logger)
+            process_table2_or_3_file(table_no, f, out_dir, layout_dir, logger)
         elif table_no == 5:
-            process_table5_file(f, out_dir, logger)
+            process_table5_file(f, out_dir, layout_dir, logger)
 
         logger.log(f"[OK]    {fname}")
 
 
-def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir, logger: Logger, status_var: tk.StringVar):
+def run_processing(layout_dir, base_out_dir, monat_dir, quartal_dir, halbjahr_dir, jahr_dir, protokoll_dir, status_var: tk.StringVar):
+    layout_dir = normalize_dir(layout_dir)
+    base_out_dir = normalize_dir(base_out_dir)
+    protokoll_dir = normalize_dir(protokoll_dir)
+
+    logger = Logger(protokoll_dir)
+
     if not base_out_dir:
         messagebox.showerror("Fehler", "Ausgabe-Basisordner muss angegeben werden.")
         return
+    if not layout_dir:
+        messagebox.showerror("Fehler", "Layouts-Ordner muss angegeben werden.")
+        return
 
     jobs = []
-    if monat_dir.strip(): jobs.append(("Monat", monat_dir.strip()))
-    if quartal_dir.strip(): jobs.append(("Quartal", quartal_dir.strip()))
-    if halbjahr_dir.strip(): jobs.append(("Halbjahr", halbjahr_dir.strip()))
-    if jahr_dir.strip(): jobs.append(("Jahr", jahr_dir.strip()))
+    if monat_dir.strip(): jobs.append(("Monat", normalize_dir(monat_dir)))
+    if quartal_dir.strip(): jobs.append(("Quartal", normalize_dir(quartal_dir)))
+    if halbjahr_dir.strip(): jobs.append(("Halbjahr", normalize_dir(halbjahr_dir)))
+    if jahr_dir.strip(): jobs.append(("Jahr", normalize_dir(jahr_dir)))
 
     if not jobs:
         messagebox.showwarning("Hinweis", "Kein Eingangsverzeichnis gesetzt (Monat/Quartal/Halbjahr/Jahr).")
         return
 
     logger.log("=== START GUI-Lauf ===")
+    logger.log(f"Layouts:       {layout_dir}")
     logger.log(f"Ausgabe-Basis: {base_out_dir}")
-    logger.log(f"Layouts:       {os.path.abspath(LAYOUT_DIR)}")
-    logger.log(f"Überschreiben: JA (vorhandene Dateien werden ersetzt)")
+    logger.log(f"Protokolle:    {os.path.dirname(logger.path)}")
     logger.log("Jobs: " + ", ".join([f"{lbl}={path}" for lbl, path in jobs]))
+    logger.log("Überschreiben: JA (vorhandene Ausgaben werden ersetzt)")
 
     try:
         for lbl, in_dir in jobs:
             status_var.set(f"Starte: {lbl}")
             logger.log(f"== JOB: {lbl} ==")
-            run_for_one_input_dir(in_dir, base_out_dir, logger, status_var)
+            run_for_one_input_dir(in_dir, base_out_dir, layout_dir, logger, status_var)
 
         status_var.set("Fertig.")
         logger.log("=== ENDE GUI-Lauf ===")
@@ -675,11 +680,20 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
         messagebox.showerror("Fehler", f"Es ist ein Fehler aufgetreten:\n{e}\n\nProtokoll:\n{logger.path}")
 
 
-def start_gui():
-    logger = Logger()
+# ============================================================
+# GUI
+# ============================================================
 
+def choose_dir(entry: ttk.Entry):
+    d = filedialog.askdirectory()
+    if d:
+        entry.delete(0, tk.END)
+        entry.insert(0, d)
+
+
+def start_gui():
     root = tk.Tk()
-    root.title("VÖ-Tabellen – GUI (Tabelle 1/2/3/5)")
+    root.title("VÖ-Tabellen-Formatter (Tabelle 1/2/3/5)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
@@ -690,48 +704,55 @@ def start_gui():
 
     entries = {}
 
-    def add_row(r, label, key):
+    def add_row(r, label, key, default=""):
         ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=4)
         e = ttk.Entry(frm, width=90)
         e.grid(row=r, column=1, sticky="we", padx=6)
+        if default:
+            e.insert(0, default)
         ttk.Button(frm, text="Auswählen…", command=lambda: choose_dir(e)).grid(row=r, column=2, sticky="e")
         entries[key] = e
 
-    add_row(0, "Monat – Eingangstabellen (optional):", "monat")
-    add_row(1, "Quartal – Eingangstabellen (optional):", "quartal")
-    add_row(2, "Halbjahr – Eingangstabellen (optional):", "halbjahr")
-    add_row(3, "Jahr – Eingangstabellen (optional):", "jahr")
-    add_row(4, "Ausgabe-Basisordner (Pflicht):", "outbase")
+    # Defaults: Layouts neben EXE / Script
+    default_layout = os.path.join(app_base_dir(), "Layouts")
+    default_log = os.path.join(app_base_dir(), "Protokolle")
+
+    add_row(0, "Layouts-Ordner (enthält Layouts/*.xlsx):", "layouts", default_layout)
+    add_row(1, "Ausgabe-Basisordner (VÖ-Tabellen wird darunter angelegt):", "outbase", "")
+    ttk.Label(frm, text="Eingangsordner (nur gefüllte werden verarbeitet):").grid(row=2, column=0, sticky="w", pady=(10, 2), columnspan=3)
+
+    add_row(3, "Monat:", "monat", "")
+    add_row(4, "Quartal:", "quartal", "")
+    add_row(5, "Halbjahr:", "halbjahr", "")
+    add_row(6, "Jahr:", "jahr", "")
+
+    add_row(7, "Protokoll-Ordner:", "logdir", default_log)
 
     status_var = tk.StringVar(value="Bereit.")
-    ttk.Label(frm, textvariable=status_var).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+    ttk.Label(frm, textvariable=status_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
     def on_run():
         run_processing(
+            entries["layouts"].get(),
+            entries["outbase"].get(),
             entries["monat"].get(),
             entries["quartal"].get(),
             entries["halbjahr"].get(),
             entries["jahr"].get(),
-            entries["outbase"].get(),
-            logger,
+            entries["logdir"].get(),
             status_var
         )
 
     btn_row = ttk.Frame(frm)
-    btn_row.grid(row=6, column=0, columnspan=3, sticky="e", pady=10)
+    btn_row.grid(row=9, column=0, columnspan=3, sticky="e", pady=10)
 
     ttk.Button(btn_row, text="Start", command=on_run).grid(row=0, column=0, padx=6)
-    ttk.Button(btn_row, text="Schließen", command=root.destroy).grid(row=0, column=1, padx=6)
+    ttk.Button(btn_row, text="Beenden", command=root.destroy).grid(row=0, column=1, padx=6)
 
     ttk.Label(
         frm,
-        text="Hinweis: Layouts werden aus .\\Layouts geladen. Ausgaben gehen nach <Basis>\\VÖ-Tabellen\\<Eingangsordnername>.",
-    ).grid(row=7, column=0, columnspan=3, sticky="w")
-
-    ttk.Label(
-        frm,
-        text=f"Protokolle werden geschrieben nach: {PROTOKOLL_DIR}",
-    ).grid(row=8, column=0, columnspan=3, sticky="w")
+        text="Ausgaben: <Ausgabe-Basis>\\VÖ-Tabellen\\<Eingangsordnername>\\...   |   Rohdateien bleiben unverändert.",
+    ).grid(row=10, column=0, columnspan=3, sticky="w")
 
     root.mainloop()
 
