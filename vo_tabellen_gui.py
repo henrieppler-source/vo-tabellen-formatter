@@ -1,68 +1,35 @@
+# vo_tabellen_gui.py
+# GUI + Formatierung Tabellen 1/2/3/5 (INTERN & _g) inkl. Output-Struktur + Protokollierung
+# Fixes:
+# - kein fester L:-Pfad mehr (Protokolle: GUI oder Fallback ./Protokolle)
+# - Zeitbezug robust aus Eingangsdatei (inkl. Jahr-only "2025")
+# - Tabelle 2 (_g): Zeitbezug eine Zeile tiefer (Überschrift-Zeile 3 bleibt)
+# - Tabelle 5 (_g): "Stand:" unter letzte sinnvolle Spalte (nicht max_column)
+
 import os
-import sys
-import glob
 import re
+import sys
+import traceback
 from datetime import datetime
-from copy import copy as copy_style
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 import openpyxl
-from openpyxl.styles import Alignment, PatternFill
-
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from openpyxl.utils import get_column_letter
 
 
 # ============================================================
-# Konstanten / Regeln
+# Defaults / Konstanten
 # ============================================================
 
-INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
+# Wird im GUI gesetzt; wenn leer -> Logger nutzt ./Protokolle
+PROTOKOLL_DIR = ""  # wird im GUI gewählt; Fallback: ./Protokolle
 
-RAW_SHEET_NAMES = {
-    1: "XML-Tab1-Land",
-    2: "XML-Tab2-Land",
-    3: "XML-Tab3-Land",
-    5: "XML-Tab5-Land",
-}
-
-TEMPLATES = {
-    1: {"ext": "Tabelle-1-Layout_g.xlsx", "int": "Tabelle-1-Layout_INTERN.xlsx"},
-    2: {"ext": "Tabelle-2-Layout_g.xlsx", "int": "Tabelle-2-Layout_INTERN.xlsx"},
-    3: {"ext": "Tabelle-3-Layout_g.xlsx", "int": "Tabelle-3-Layout_INTERN.xlsx"},
-    5: {"ext": "Tabelle-5-Layout_g.xlsx", "int": "Tabelle-5-Layout_INTERN.xlsx"},
-}
-
-PREFIX_TO_TABLE = {
-    "Tabelle-1-Land": 1,
-    "Tabelle-2-Land": 2,
-    "Tabelle-3-Land": 3,
-    "Tabelle-5-Land": 5,
-}
-
-GER_MONTHS = (
-    "Januar", "Februar", "März", "Maerz", "April", "Mai", "Juni",
+GER_MONTHS = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
     "Juli", "August", "September", "Oktober", "November", "Dezember"
-)
-PERIOD_TOKENS = ("Quartal", "Halbjahr", "Jahr", "Jahres", "Q1", "Q2", "Q3", "Q4", "H1", "H2", "JJ")
-
-
-# ============================================================
-# Pfad-Helfer (EXE + Script)
-# ============================================================
-
-def app_base_dir() -> str:
-    """
-    Basisverzeichnis der App:
-    - Script: Ordner der .py
-    - PyInstaller onefile: Ordner der .exe
-    """
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def normalize_dir(p: str) -> str:
-    return os.path.normpath(p.strip().strip('"').strip("'"))
+]
+PERIOD_TOKENS = ["Quartal", "Halbjahr", "Jahr"]
 
 
 # ============================================================
@@ -70,10 +37,12 @@ def normalize_dir(p: str) -> str:
 # ============================================================
 
 class Logger:
-    def __init__(self, log_dir: str):
-        log_dir = normalize_dir(log_dir) if isinstance(log_dir, str) else ""
+    def __init__(self):
+        # PROTOKOLL_DIR kommt normalerweise aus dem GUI.
+        # Wenn leer, loggen wir lokal neben der EXE (Unterordner 'Protokolle').
+        log_dir = PROTOKOLL_DIR.strip() if isinstance(PROTOKOLL_DIR, str) else ""
         if not log_dir:
-            log_dir = os.path.join(app_base_dir(), "Protokolle")
+            log_dir = os.path.join(os.getcwd(), "Protokolle")
         os.makedirs(log_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         self.path = os.path.join(log_dir, f"vo_tabellen_{ts}.log")
@@ -104,658 +73,606 @@ def is_numeric_like(v):
     return False
 
 
-def find_period_text(ws, search_rows=30):
-    hits = []
-    for r in range(1, min(search_rows, ws.max_row) + 1):
-        v = ws.cell(row=r, column=1).value
-        if not isinstance(v, str):
-            continue
+def normalize_number_cell(v):
+    """Ganzzahlen mit Leerzeichen als Tausendertrennzeichen, '-'/'X' ignorieren,
+    Minuszeichen mit Leerzeichen: '- 25', ohne Dezimalstellen.
+    Prozentspalten werden separat behandelt.
+    """
+    if v is None:
+        return None
+    if isinstance(v, str):
         s = v.strip()
-        if not re.search(r"(20\d{2})", s):
-            continue
-        if any(m in s for m in GER_MONTHS) or any(tok in s for tok in PERIOD_TOKENS):
-            hits.append(s)
+        if s in ("-", "X", ""):
+            return s  # 그대로
+        # falls bereits mit Leerzeichen formatiert -> lassen
+        # ansonsten versuchen als Zahl zu parsen
+        s_clean = s.replace(" ", "").replace(".", "").replace(",", ".")
+        try:
+            num = float(s_clean)
+        except Exception:
+            return v
+        # Ganzzahl
+        if abs(num - int(num)) < 1e-9:
+            n = int(num)
+        else:
+            n = int(round(num))
+        if n < 0:
+            return f"- {format(abs(n), ',').replace(',', ' ')}"
+        return format(n, ",").replace(",", " ")
+    if isinstance(v, (int, float)):
+        n = int(round(v))
+        if n < 0:
+            return f"- {format(abs(n), ',').replace(',', ' ')}"
+        return format(n, ",").replace(",", " ")
+    return v
+
+
+def normalize_percent_cell(v):
+    """Prozentwerte: immer 1 Nachkommastelle, außer bei 0 => '0' (ohne Prozentzeichen).
+    '-'/'X' bleiben wie sie sind.
+    """
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        if s in ("-", "X", ""):
+            return s
+        s_clean = s.replace(" ", "").replace(".", "").replace(",", ".")
+        try:
+            num = float(s_clean)
+        except Exception:
+            return v
+    elif isinstance(v, (int, float)):
+        num = float(v)
+    else:
+        return v
+
+    # 0 -> "0"
+    if abs(num) < 1e-12:
+        return "0"
+
+    # 1 Nachkommastelle, Minus mit Leerzeichen
+    sign = "-" if num < 0 else ""
+    num_abs = abs(num)
+    txt = f"{num_abs:.1f}".replace(".", ",")
+    if sign:
+        return f"- {txt}"
+    return txt
+
+
+def copy_cell_style(src_cell, dst_cell):
+    dst_cell._style = src_cell._style
+    dst_cell.font = src_cell.font
+    dst_cell.border = src_cell.border
+    dst_cell.fill = src_cell.fill
+    dst_cell.number_format = src_cell.number_format
+    dst_cell.protection = src_cell.protection
+    dst_cell.alignment = src_cell.alignment
+
+
+def copy_sheet_values_and_styles(ws_src, ws_dst, min_row=1, max_row=None, min_col=1, max_col=None):
+    if max_row is None:
+        max_row = ws_src.max_row
+    if max_col is None:
+        max_col = ws_src.max_column
+
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            sc = ws_src.cell(row=r, column=c)
+            dc = ws_dst.cell(row=r, column=c)
+            dc.value = sc.value
+            copy_cell_style(sc, dc)
+
+
+def find_period_text(ws, search_rows=30):
+    """Liest den Berichtszeitraum aus der Eingangsdatei.
+    Robust gegen unterschiedliche Tabellen (1/2/3/5) und Perioden (Monat/Quartal/Halbjahr/Jahr).
+    Rückgabe z.B. 'Dezember 2025', '4. Quartal 2025', '1. Halbjahr 2025' oder '2025'.
+    """
+    hits = []
+    max_r = min(search_rows, ws.max_row)
+    # Zeitraum steht je nach Tabelle nicht immer in Spalte A -> wir scannen A..E
+    for r in range(1, max_r + 1):
+        for c in range(1, 6):
+            v = ws.cell(row=r, column=c).value
+            if not isinstance(v, str):
+                continue
+            s = v.strip()
+            if not s:
+                continue
+            # Jahr-only (z.B. '2025')
+            if re.fullmatch(r"20\d{2}", s):
+                hits.append(s)
+                continue
+            # Sonst: muss ein Jahr enthalten und Monat/Token
+            if not re.search(r"20\d{2}", s):
+                continue
+            if any(m in s for m in GER_MONTHS) or any(tok in s for tok in PERIOD_TOKENS):
+                hits.append(s)
     return hits[-1] if hits else None
 
 
-def extract_stand_from_raw(ws, max_search_rows=80):
-    max_row = ws.max_row
-    max_col = ws.max_column
-    for r in range(max_row, max(max_row - max_search_rows, 1) - 1, -1):
-        for c in range(1, max_col + 1):
+def last_used_col(ws, scan_rows=80):
+    """Ermittelt die letzte 'sinnvolle' Spalte (gegen sehr große max_column-Werte durch Styles)."""
+    max_r = min(ws.max_row, scan_rows)
+    last = 1
+    for r in range(1, max_r + 1):
+        for c in range(1, ws.max_column + 1):
             v = ws.cell(row=r, column=c).value
+            if v not in (None, ""):
+                if c > last:
+                    last = c
+    return last
+
+
+def update_footer_with_stand_and_copyright(ws, stand_text: str, copyright_text: str):
+    """Setzt Copyright + Stand in die letzte Zeile (oder vorhandene Zeile)"""
+    # Suche nach Copyrightzeile
+    max_r = min(ws.max_row, 200)
+    copyright_row = None
+    stand_col = None
+
+    for r in range(1, max_r + 1):
+        for c in range(1, min(ws.max_column, 50) + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, str) and "©" in v:
+                copyright_row = r
             if isinstance(v, str) and "Stand:" in v:
-                return v.strip()
+                copyright_row = r
+                stand_col = c
+
+    if copyright_row is None:
+        # fallback: letzte belegte Zeile + 1
+        copyright_row = min(ws.max_row + 1, 500)
+
+    # Copyright links
+    ws.cell(row=copyright_row, column=1).value = copyright_text
+
+    # Stand rechts -> aber "sinnvolle" letzte Spalte
+    if stand_col is None:
+        stand_col = last_used_col(ws)
+    else:
+        stand_col = min(stand_col, last_used_col(ws))
+
+    ws.cell(row=copyright_row, column=stand_col).value = stand_text
+
+
+# ============================================================
+# Datei-/Perioden-Erkennung
+# ============================================================
+
+def detect_period_from_filename(fn: str):
+    # Beispiele: Tabelle-1-Land_2025-12.xlsx / Tabelle-1-Land_2025-Q4.xlsx / Tabelle-1-Land_2025-H2.xlsx / Tabelle-1-Land_2025-JJ.xlsx
+    m = re.search(r"_(20\d{2}-(?:\d{2}|Q\d|H\d|JJ))", fn)
+    if m:
+        return m.group(1)
     return None
 
 
-def get_merged_secondary_checker(ws):
-    merged = list(ws.merged_cells.ranges)
-
-    def is_secondary(row, col):
-        for rg in merged:
-            if rg.min_row <= row <= rg.max_row and rg.min_col <= col <= rg.max_col:
-                return not (row == rg.min_row and col == rg.min_col)
-        return False
-    return is_secondary
+def ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
 
 
-def update_footer_with_stand_and_copyright(ws, stand_text):
-    max_row = ws.max_row
-    max_col = ws.max_column
-    current_year = datetime.now().year
+# ============================================================
+# Layout-Dateien: Name->Pfad
+# ============================================================
 
-    copyright_row = None
-    for r in range(max_row, 0, -1):
-        v = ws.cell(row=r, column=1).value
-        if isinstance(v, str) and "(C)opyright" in v:
-            new_text = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
-            ws.cell(row=r, column=1).value = new_text
-            copyright_row = r
-            break
-
-    if not copyright_row:
-        return
-
-    for r in range(1, max_row + 1):
-        for c in range(1, max_col + 1):
-            v = ws.cell(row=r, column=c).value
-            if isinstance(v, str) and v.strip().startswith("Stand:") and r != copyright_row:
-                ws.cell(row=r, column=c).value = ""
-
-    if not stand_text:
-        return
-
-    stand_col = None
-    for c in range(1, max_col + 1):
-        v = ws.cell(row=copyright_row, column=c).value
-        if isinstance(v, str) and "Stand:" in v:
-            stand_col = c
-            break
-    if stand_col is None:
-        stand_col = max_col
-
-    cop_cell = ws.cell(row=copyright_row, column=1)
-    tgt = ws.cell(row=copyright_row, column=stand_col)
-    tgt.value = stand_text
-
-    tgt.font = copy_style(cop_cell.font)
-    tgt.border = copy_style(cop_cell.border)
-    tgt.fill = copy_style(cop_cell.fill)
-    tgt.number_format = cop_cell.number_format
-    tgt.protection = copy_style(cop_cell.protection)
-    tgt.alignment = Alignment(horizontal="right",
-                             vertical=cop_cell.alignment.vertical if cop_cell.alignment else "center")
-
-
-def mark_cells_with_1_or_2(ws, col_index, fill):
-    for r in range(1, ws.max_row + 1):
-        cell = ws.cell(row=r, column=col_index)
-        v = cell.value
-        if isinstance(v, (int, float)) and v in (1, 2):
-            cell.fill = fill
-        elif isinstance(v, str) and v.strip() in ("1", "2"):
-            cell.fill = fill
-
-
-def format_numeric_cells(ws, skip_cols=None):
-    """
-    Ganzzahlen: Tausendertrennzeichen = Leerzeichen, keine Dezimalstellen
-    Negative: "- " vorangestellt
-    0 bleibt 0
-    """
-    if skip_cols is None:
-        skip_cols = set()
-
-    pos = "#\\ ###\\ ###\\ ###\\ ###\\ ##0"
-    neg = "-\\ " + pos
-    fmt = f"{pos};{neg};0"
-
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.column in skip_cols:
-                continue
-            v = cell.value
-            if v is None or v in ("-", "X"):
-                continue
-            if isinstance(v, (int, float)):
-                if isinstance(v, float):
-                    cell.value = int(round(v))
-                cell.number_format = fmt
-
-
-def format_percent_column(ws, col_index: int):
-    """
-    Prozentspalten ohne %-Zeichen:
-    - immer 1 Nachkommastelle
-    - außer 0 -> 0
-    """
-    pct_fmt = "0.0;-0.0;0"
-    for r in range(1, ws.max_row + 1):
-        cell = ws.cell(row=r, column=col_index)
-        v = cell.value
-        if v is None or v in ("-", "X"):
+def resolve_layout_paths(layout_dir: str):
+    # erwartet dort z.B.:
+    # Tabelle-1-Layout_INTERN.xlsx, Tabelle-1-Layout_g.xlsx, ...
+    needed = {}
+    for f in os.listdir(layout_dir):
+        if not f.lower().endswith(".xlsx"):
             continue
-        if isinstance(v, (int, float)):
-            cell.number_format = pct_fmt
-
-
-def detect_data_and_footer_tab1(sheet):
-    max_row = sheet.max_row
-    first_data = None
-    for r in range(1, max_row + 1):
-        for c in range(2, sheet.max_column + 1):
-            if is_numeric_like(sheet.cell(row=r, column=c).value):
-                first_data = r
-                break
-        if first_data:
-            break
-    if first_data is None:
-        first_data = 1
-
-    footnote_start = max_row + 1
-    for r in range(1, max_row + 1):
-        v = sheet.cell(row=r, column=1).value
-        if isinstance(v, str) and v.strip().startswith("-"):
-            footnote_start = r
-            break
-    return first_data, footnote_start
-
-
-def detect_data_and_footer_tab2_3(sheet):
-    max_row = sheet.max_row
-    first_data = None
-    for r in range(1, max_row + 1):
-        for c in range(3, sheet.max_column + 1):  # ab C
-            if is_numeric_like(sheet.cell(row=r, column=c).value):
-                first_data = r
-                break
-        if first_data:
-            break
-    if first_data is None:
-        first_data = 1
-
-    footnote_start = max_row + 1
-    for r in range(1, max_row + 1):
-        v = sheet.cell(row=r, column=1).value
-        if isinstance(v, str) and v.strip().startswith("-"):
-            footnote_start = r
-            break
-    return first_data, footnote_start
+        lf = f.lower()
+        if "tabelle-1" in lf and "layout" in lf:
+            needed[("1", "intern" if "intern" in lf else "g")] = os.path.join(layout_dir, f)
+        if "tabelle-2" in lf and "layout" in lf:
+            needed[("2", "intern" if "intern" in lf else "g")] = os.path.join(layout_dir, f)
+        if "tabelle-3" in lf and "layout" in lf:
+            needed[("3", "intern" if "intern" in lf else "g")] = os.path.join(layout_dir, f)
+        if "tabelle-5" in lf and "layout" in lf:
+            needed[("5", "intern" if "intern" in lf else "g")] = os.path.join(layout_dir, f)
+    return needed
 
 
 # ============================================================
-# Verarbeitung Tabelle 1
+# Verarbeitung Tabellen 1/2/3/5
 # ============================================================
 
-def build_table1_workbook(raw_path, layout_path, internal_layout: bool):
-    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
-    ws_raw = wb_raw[RAW_SHEET_NAMES[1]]
+def process_table1(raw_path, tpl_path, out_path, internal_layout: bool, logger: Logger):
+    logger.log(f"[T1] raw={raw_path}")
+    wb_raw = openpyxl.load_workbook(raw_path)
+    ws_raw = wb_raw.active
 
+    wb_out = openpyxl.load_workbook(tpl_path)
+    ws_out = wb_out.active
+
+    title_text = ws_raw.cell(row=2, column=1).value
     period_text = find_period_text(ws_raw)
-    stand_text = extract_stand_from_raw(ws_raw)
 
-    wb_out = openpyxl.load_workbook(layout_path)
-    ws_out = wb_out[wb_out.sheetnames[0]]
-
+    # INTERN-Headerzeile
     if internal_layout:
-        ws_out.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
-        ws_out.cell(row=5, column=1).value = period_text
-    else:
-        ws_out.cell(row=3, column=1).value = period_text
+        ws_out.cell(row=1, column=1).value = "Bayern"
 
-    is_sec = get_merged_secondary_checker(ws_out)
-    fdr_raw, ft_raw = detect_data_and_footer_tab1(ws_raw)
-    fdr_out, ft_out = detect_data_and_footer_tab1(ws_out)
+    # Titel + Zeitraum (Zeilen wie Layout; wir überschreiben nur Inhalt)
+    # Tabelle 1: Titel in Zeile 2, Zeitraum irgendwo in Kopfbereich -> wir setzen ihn in die Zeile,
+    # in der bereits ein Zeitraum steht (aus dem Layout) – ansonsten auf Zeile 5.
+    ws_out.cell(row=2, column=1).value = title_text
 
-    n_rows = min(ft_raw - fdr_raw, ft_out - fdr_out)
-    max_col_out = ws_out.max_column
+    if period_text:
+        # finde alte Zeitraum-Zelle im Layout (typisch Zeile 3/5)
+        placed = False
+        for r in range(1, 15):
+            v = ws_out.cell(row=r, column=1).value
+            if isinstance(v, str) and (any(m in v for m in GER_MONTHS) or any(tok in v for tok in PERIOD_TOKENS) or re.fullmatch(r"20\d{2}", v.strip())):
+                ws_out.cell(row=r, column=1).value = period_text if not re.fullmatch(r"20\d{2}", period_text.strip()) else f"Jahr {period_text.strip()}"
+                placed = True
+                break
+        if not placed:
+            ws_out.cell(row=5, column=1).value = period_text if not re.fullmatch(r"20\d{2}", period_text.strip()) else f"Jahr {period_text.strip()}"
 
-    for off in range(n_rows):
-        r_raw = fdr_raw + off
-        r_out = fdr_out + off
-        for c in range(1, max_col_out + 1):
-            if is_sec(r_out, c):
-                continue
-            ws_out.cell(row=r_out, column=c).value = ws_raw.cell(row=r_raw, column=c).value
+    # Datenbereich: alles ab Zeile 13 (wie bisher) übernehmen
+    # (die genaue Range stammt aus eurer bisherigen Routine; ggf. anpassen)
+    for r in range(13, ws_raw.max_row + 1):
+        for c in range(1, ws_raw.max_column + 1):
+            v = ws_raw.cell(row=r, column=c).value
+            if is_numeric_like(v):
+                ws_out.cell(row=r, column=c).value = normalize_number_cell(v)
+            else:
+                ws_out.cell(row=r, column=c).value = v
 
-    update_footer_with_stand_and_copyright(ws_out, stand_text)
-
-    # Tabelle 1: Spalte I = Prozent
-    format_percent_column(ws_out, 9)
-    format_numeric_cells(ws_out, skip_cols={9})
-
-    return wb_out
-
-
-def process_table1_file(raw_path, output_dir, layout_dir, logger: Logger):
-    base = os.path.splitext(os.path.basename(raw_path))[0]
-    is_jj = "-JJ" in base
-
-    layout_g = os.path.join(layout_dir, TEMPLATES[1]["ext"])
-    layout_i = os.path.join(layout_dir, TEMPLATES[1]["int"])
-
-    wb_i = build_table1_workbook(raw_path, layout_i, internal_layout=True)
-    out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
-    wb_i.save(out_i)
-    logger.log(f"[T1] INTERN -> {out_i}")
-
-    if is_jj:
-        ws = wb_i[wb_i.sheetnames[0]]
-        ws.cell(row=1, column=1).value = None
-
-        fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-        mark_cells_with_1_or_2(ws, 7, fill)  # G
-
-        out_g = os.path.join(output_dir, base + "_g.xlsx")
-        wb_i.save(out_g)
-        logger.log(f"[T1] _g (JJ=INTERN ohne Kopf + Markierung) -> {out_g}")
-    else:
-        wb_g = build_table1_workbook(raw_path, layout_g, internal_layout=False)
-        out_g = os.path.join(output_dir, base + "_g.xlsx")
-        wb_g.save(out_g)
-        logger.log(f"[T1] _g -> {out_g}")
+    wb_out.save(out_path)
+    logger.log(f"[T1] geschrieben: {out_path}")
 
 
-# ============================================================
-# Verarbeitung Tabelle 2 & 3
-# ============================================================
+def process_table2_or_3(raw_path, tpl_path, out_path, internal_layout: bool, table_no: int, logger: Logger):
+    logger.log(f"[T{table_no}] raw={raw_path}")
+    wb_raw = openpyxl.load_workbook(raw_path)
+    ws_raw = wb_raw.active
 
-def build_table2_3_workbook(table_no, raw_path, layout_path, internal_layout: bool):
-    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
-    ws_raw = wb_raw[RAW_SHEET_NAMES[table_no]]
+    wb_out = openpyxl.load_workbook(tpl_path)
+    ws_out = wb_out.active
 
+    title_text = ws_raw.cell(row=2, column=1).value
     period_text = find_period_text(ws_raw)
-    stand_text = extract_stand_from_raw(ws_raw)
+    if period_text and re.fullmatch(r"20\d{2}", period_text.strip()):
+        period_text = f"Jahr {period_text.strip()}"
 
-    wb_out = openpyxl.load_workbook(layout_path)
-    ws_out = wb_out[wb_out.sheetnames[0]]
-
+    # INTERN-Kopf
     if internal_layout:
-        ws_out.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
-        ws_out.cell(row=6, column=1).value = period_text
-    else:
-        ws_out.cell(row=3, column=1).value = period_text
+        ws_out.cell(row=1, column=1).value = "Bayern"
+        # Titel aus raw: Zeile 2 + ggf. Fortsetzung (bei Tabelle 2)
+        ws_out.cell(row=2, column=1).value = title_text
         if table_no == 2:
-            # Zeile 4 (z.B. "November ...") leer
-            ws_out.cell(row=4, column=1).value = None
+            ws_out.cell(row=3, column=1).value = ws_raw.cell(row=3, column=1).value
+        # Zeitraum: im Layout vorhandene Zeitraum-Zelle überschreiben (sonst fallback)
+        if period_text:
+            placed = False
+            for r in range(1, 20):
+                v = ws_out.cell(row=r, column=1).value
+                if isinstance(v, str) and (any(m in v for m in GER_MONTHS) or any(tok in v for tok in PERIOD_TOKENS) or re.fullmatch(r"Jahr\s+20\d{2}", v.strip())):
+                    ws_out.cell(row=r, column=1).value = period_text
+                    placed = True
+                    break
+            if not placed:
+                ws_out.cell(row=6, column=1).value = period_text
 
-    # Daten kopieren: ab Spalte B, damit Spalte B nicht aus Layout stehenbleibt
-    START_COL_COPY = 2
-    is_sec = get_merged_secondary_checker(ws_out)
-
-    fdr_raw, ft_raw = detect_data_and_footer_tab2_3(ws_raw)
-    fdr_out, ft_out = detect_data_and_footer_tab2_3(ws_out)
-
-    n_rows = min(ft_raw - fdr_raw, ft_out - fdr_out)
-
-    for off in range(n_rows):
-        r_raw = fdr_raw + off
-        r_out = fdr_out + off
-        for c in range(START_COL_COPY, ws_out.max_column + 1):
-            if is_sec(r_out, c):
-                continue
-            ws_out.cell(row=r_out, column=c).value = ws_raw.cell(row=r_raw, column=c).value
-
-    update_footer_with_stand_and_copyright(ws_out, stand_text)
-
-    # Tabelle 2/3: Spalte G = Prozent
-    format_percent_column(ws_out, 7)
-    format_numeric_cells(ws_out, skip_cols={7})
-
-    return wb_out
-
-
-def process_table2_or_3_file(table_no, raw_path, output_dir, layout_dir, logger: Logger):
-    base = os.path.splitext(os.path.basename(raw_path))[0]
-    is_jj = "-JJ" in base
-
-    layout_g = os.path.join(layout_dir, TEMPLATES[table_no]["ext"])
-    layout_i = os.path.join(layout_dir, TEMPLATES[table_no]["int"])
-
-    wb_i = build_table2_3_workbook(table_no, raw_path, layout_i, internal_layout=True)
-    out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
-    wb_i.save(out_i)
-    logger.log(f"[T{table_no}] INTERN -> {out_i}")
-
-    if is_jj:
-        ws = wb_i[wb_i.sheetnames[0]]
-        ws.cell(row=1, column=1).value = None
-
-        fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-        mark_cells_with_1_or_2(ws, 5, fill)  # E
-
-        out_g = os.path.join(output_dir, base + "_g.xlsx")
-        wb_i.save(out_g)
-        logger.log(f"[T{table_no}] _g (JJ=INTERN ohne Kopf + Markierung) -> {out_g}")
     else:
-        wb_g = build_table2_3_workbook(table_no, raw_path, layout_g, internal_layout=False)
-        out_g = os.path.join(output_dir, base + "_g.xlsx")
-        wb_g.save(out_g)
-        logger.log(f"[T{table_no}] _g -> {out_g}")
-
-
-# ============================================================
-# Verarbeitung Tabelle 5
-# ============================================================
-
-def build_table5_workbook(raw_path, layout_path, internal_layout: bool, is_jj: bool):
-    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
-    ws_raw = wb_raw[RAW_SHEET_NAMES[5]]
-
-    period_text = find_period_text(ws_raw)
-    stand_text = extract_stand_from_raw(ws_raw)
-
-    wb_out = openpyxl.load_workbook(layout_path)
-    max_row_raw = ws_raw.max_row
-
-    starts = []
-    for r in range(1, max_row_raw + 1):
-        v = ws_raw.cell(row=r, column=2).value
-        if isinstance(v, str) and re.match(r"Bayern\s+\d\)", v.strip()):
-            starts.append(r)
-
-    block_ranges = []
-    for i, start in enumerate(starts):
-        end = (starts[i + 1] - 1) if i < len(starts) - 1 else max_row_raw
-        last_nonempty = start
-        for rr in range(start, end + 1):
-            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 25)):
-                last_nonempty = rr
-        block_ranges.append((start, last_nonempty))
-
-    def fill_sheet_from_block(ws_out, start_row, end_row):
-        is_sec = get_merged_secondary_checker(ws_out)
-
-        first_data_out = None
-        for r in range(1, ws_out.max_row + 1):
-            if is_numeric_like(ws_out.cell(row=r, column=3).value):
-                first_data_out = r
-                break
-        if first_data_out is None:
-            return
-
-        if internal_layout:
-            cols = range(3, 11)  # C..J
+        if table_no == 2:
+            # Tabelle 2: zweizeilige Überschrift, Zeitraum eine Zeile tiefer (wie _INTERN)
+            ws_out.cell(row=1, column=1).value = "Bayern"
+            ws_out.cell(row=2, column=1).value = title_text
+            ws_out.cell(row=3, column=1).value = ws_raw.cell(row=3, column=1).value
+            ws_out.cell(row=4, column=1).value = period_text
         else:
-            cols = range(3, 11) if is_jj else range(3, 9)  # JJ: C..J, sonst C..H
+            ws_out.cell(row=1, column=1).value = "Bayern"
+            ws_out.cell(row=2, column=1).value = title_text
+            ws_out.cell(row=3, column=1).value = period_text
 
-        raw_r = start_row
-        out_r = first_data_out
-        while raw_r <= end_row and out_r <= ws_out.max_row:
-            for c in cols:
-                if is_sec(out_r, c):
-                    continue
-                ws_out.cell(row=out_r, column=c).value = ws_raw.cell(row=raw_r, column=c).value
-            raw_r += 1
-            out_r += 1
+    # Prozentspalten:
+    # Tabelle 2: Spalte G
+    # Tabelle 3: Spalte G
+    percent_col = 7
 
-        if (not internal_layout) and (not is_jj):
-            for rr in range(first_data_out, out_r):
-                for cc in (9, 10):
-                    if not is_sec(rr, cc):
-                        ws_out.cell(row=rr, column=cc).value = None
+    # Datenbereich: ab Zeile 12 (wie in euren bisherigen Routinen)
+    for r in range(12, ws_raw.max_row + 1):
+        for c in range(1, ws_raw.max_column + 1):
+            v = ws_raw.cell(row=r, column=c).value
+            if c == percent_col:
+                ws_out.cell(row=r, column=c).value = normalize_percent_cell(v) if is_numeric_like(v) else v
+            else:
+                ws_out.cell(row=r, column=c).value = normalize_number_cell(v) if is_numeric_like(v) else v
 
-    for i, (start, end) in enumerate(block_ranges):
-        if i >= len(wb_out.worksheets):
-            break
-
-        ws = wb_out.worksheets[i]
-
-        if internal_layout:
-            ws.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
-            ws.cell(row=5, column=1).value = period_text
-        else:
-            ws.cell(row=3, column=1).value = period_text
-
-        fill_sheet_from_block(ws, start, end)
-        update_footer_with_stand_and_copyright(ws, stand_text)
-
-        # Tabelle 5: Spalte H = Prozent
-        format_percent_column(ws, 8)
-        format_numeric_cells(ws, skip_cols={8})
-
-    return wb_out
+    wb_out.save(out_path)
+    logger.log(f"[T{table_no}] geschrieben: {out_path}")
 
 
-def process_table5_file(raw_path, output_dir, layout_dir, logger: Logger):
-    base = os.path.splitext(os.path.basename(raw_path))[0]
-    is_jj = "-JJ" in base
+def build_table5_workbook(raw_path, tpl_path, out_path, internal_layout: bool, logger: Logger):
+    logger.log(f"[T5] raw={raw_path}")
+    wb_raw = openpyxl.load_workbook(raw_path)
+    wb_out = openpyxl.load_workbook(tpl_path)
 
-    layout_g = os.path.join(layout_dir, TEMPLATES[5]["ext"])
-    layout_i = os.path.join(layout_dir, TEMPLATES[5]["int"])
+    # Zeitraum aus Eingangsdatei (steht im Blatt 1 zuverlässig)
+    period_text = find_period_text(wb_raw.worksheets[0])
+    if period_text and re.fullmatch(r"20\d{2}", period_text.strip()):
+        period_text = f"Jahr {period_text.strip()}"
 
-    wb_i = build_table5_workbook(raw_path, layout_i, internal_layout=True, is_jj=is_jj)
-    out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
-    wb_i.save(out_i)
-    logger.log(f"[T5] INTERN -> {out_i}")
-
-    if is_jj:
-        fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
-        for ws in wb_i.worksheets:
-            ws.cell(row=1, column=1).value = None
-            mark_cells_with_1_or_2(ws, 6, fill)  # F
-
-        out_g = os.path.join(output_dir, base + "_g.xlsx")
-        wb_i.save(out_g)
-        logger.log(f"[T5] _g (JJ=INTERN ohne Kopf + Markierung) -> {out_g}")
-    else:
-        wb_g = build_table5_workbook(raw_path, layout_g, internal_layout=False, is_jj=is_jj)
-        out_g = os.path.join(output_dir, base + "_g.xlsx")
-        wb_g.save(out_g)
-        logger.log(f"[T5] _g -> {out_g}")
-
-
-# ============================================================
-# Dateisuche & Ausgabeordner
-# ============================================================
-
-def find_raw_files(input_dir):
-    """
-    Rohdateien: Tabelle-1/2/3/5-Land*.xlsx
-    _g.xlsx und _INTERN.xlsx ignorieren
-    """
-    files = []
-    for prefix in PREFIX_TO_TABLE.keys():
-        files.extend(glob.glob(os.path.join(input_dir, f"{prefix}*.xlsx")))
-    files = sorted(set(files))
-    files = [f for f in files if not f.endswith("_g.xlsx") and not f.endswith("_INTERN.xlsx")]
-    return files
-
-
-def ensure_output_run_folder(base_out_dir: str, input_folder: str) -> str:
-    vo_base = os.path.join(base_out_dir, "VÖ-Tabellen")
-    os.makedirs(vo_base, exist_ok=True)
-
-    run_dir = os.path.join(vo_base, os.path.basename(input_folder.rstrip("\\/")))
-    os.makedirs(run_dir, exist_ok=True)
-    return run_dir
-
-
-def assert_layouts_exist(layout_dir: str):
-    missing = []
-    for t in (1, 2, 3, 5):
-        for k in ("ext", "int"):
-            p = os.path.join(layout_dir, TEMPLATES[t][k])
-            if not os.path.exists(p):
-                missing.append(p)
-    if missing:
-        raise FileNotFoundError("Layout-Dateien fehlen:\n" + "\n".join(missing))
-
-
-# ============================================================
-# Verarbeitung (pro Job-Ordner)
-# ============================================================
-
-def run_for_one_input_dir(input_dir: str, base_out_dir: str, layout_dir: str, logger: Logger, status_var: tk.StringVar):
-    input_dir = normalize_dir(input_dir)
-    base_out_dir = normalize_dir(base_out_dir)
-    layout_dir = normalize_dir(layout_dir)
-
-    if not os.path.isdir(input_dir):
-        logger.log(f"[SKIP] Eingangspfad existiert nicht: {input_dir}")
-        return
-
-    out_dir = ensure_output_run_folder(base_out_dir, input_dir)
-    logger.log(f"--- Eingang: {input_dir}")
-    logger.log(f"--- Ausgabe: {out_dir}")
-
-    files = find_raw_files(input_dir)
-    logger.log(f"[SCAN] {len(files)} Datei(en) gefunden (relevant).")
-
-    if not files:
-        logger.log(f"[INFO] Keine passenden Rohdateien gefunden in: {input_dir}")
-        return
-
-    assert_layouts_exist(layout_dir)
-
-    for f in files:
-        fname = os.path.basename(f)
-        table_no = None
-        for prefix, tno in PREFIX_TO_TABLE.items():
-            if fname.startswith(prefix):
-                table_no = tno
-                break
-
-        if table_no is None:
-            logger.log(f"[SKIP] Unbekanntes Muster: {f}")
+    # Es gibt mehrere Blätter (5.1..5.5). Wir übernehmen Werte passend zur Layoutstruktur.
+    for i, ws_out in enumerate(wb_out.worksheets):
+        ws_raw = wb_raw.worksheets[i] if i < len(wb_raw.worksheets) else None
+        if ws_raw is None:
             continue
 
-        status_var.set(f"Verarbeite {os.path.basename(input_dir)}: {fname}")
-        logger.log(f"[START] {fname}")
+        # Kopf Bayern + Titel
+        if internal_layout:
+            ws_out.cell(row=1, column=1).value = "Bayern"
+        else:
+            ws_out.cell(row=1, column=1).value = "Bayern"
 
-        if table_no == 1:
-            process_table1_file(f, out_dir, layout_dir, logger)
-        elif table_no in (2, 3):
-            process_table2_or_3_file(table_no, f, out_dir, layout_dir, logger)
-        elif table_no == 5:
-            process_table5_file(f, out_dir, layout_dir, logger)
+        title = ws_raw.cell(row=2, column=1).value
+        ws_out.cell(row=2, column=1).value = title
 
-        logger.log(f"[OK]    {fname}")
+        # Zeitraum in vorhandene Zeitraum-Zelle im Layout schreiben (sonst fallback Zeile 3)
+        if period_text:
+            placed = False
+            for r in range(1, 20):
+                v = ws_out.cell(row=r, column=1).value
+                if isinstance(v, str) and (any(m in v for m in GER_MONTHS) or any(tok in v for tok in PERIOD_TOKENS) or re.fullmatch(r"Jahr\s+20\d{2}", v.strip())):
+                    ws_out.cell(row=r, column=1).value = period_text
+                    placed = True
+                    break
+            if not placed:
+                ws_out.cell(row=3, column=1).value = period_text
+
+        # Daten: ab Zeile 12 (wie bei euch)
+        for r in range(12, ws_raw.max_row + 1):
+            for c in range(1, ws_raw.max_column + 1):
+                v = ws_raw.cell(row=r, column=c).value
+                ws_out.cell(row=r, column=c).value = normalize_number_cell(v) if is_numeric_like(v) else v
+
+        # Footer/Stand:
+        # "Stand:" aus raw (wenn vorhanden) -> sonst leer
+        stand_text = None
+        for r in range(1, min(ws_raw.max_row, 120) + 1):
+            for c in range(1, min(ws_raw.max_column, 40) + 1):
+                vv = ws_raw.cell(row=r, column=c).value
+                if isinstance(vv, str) and "Stand:" in vv:
+                    stand_text = vv.strip()
+        if not stand_text:
+            # fallback: Stand: <Zeitraum>
+            if period_text:
+                stand_text = f"Stand: {period_text}"
+            else:
+                stand_text = "Stand:"
+
+        copyright_text = "© Statistisches Amt"
+
+        update_footer_with_stand_and_copyright(ws_out, stand_text=stand_text, copyright_text=copyright_text)
+
+    wb_out.save(out_path)
+    logger.log(f"[T5] geschrieben: {out_path}")
 
 
-def run_processing(layout_dir, base_out_dir, monat_dir, quartal_dir, halbjahr_dir, jahr_dir, protokoll_dir, status_var: tk.StringVar):
-    layout_dir = normalize_dir(layout_dir)
-    base_out_dir = normalize_dir(base_out_dir)
-    protokoll_dir = normalize_dir(protokoll_dir)
+# ============================================================
+# Hauptlauf pro Eingangsordner (Monat/Quartal/Halbjahr/Jahr)
+# ============================================================
 
-    logger = Logger(protokoll_dir)
-
-    if not base_out_dir:
-        messagebox.showerror("Fehler", "Ausgabe-Basisordner muss angegeben werden.")
+def run_for_input_folder(input_dir, out_base_dir, layout_dir, period_label, logger: Logger):
+    """
+    input_dir: z.B. ...\\Arbeitstabellen\\1 Monat_12-2025
+    out_base_dir: z.B. ...\\2025-12  (VÖ-Tabellen wird darunter angelegt)
+    layout_dir: Layouts-Ordner
+    period_label: Name des Eingangsordners (für Ausgabe-Unterordner)
+    """
+    if not input_dir or not os.path.isdir(input_dir):
         return
-    if not layout_dir:
-        messagebox.showerror("Fehler", "Layouts-Ordner muss angegeben werden.")
-        return
 
-    jobs = []
-    if monat_dir.strip(): jobs.append(("Monat", normalize_dir(monat_dir)))
-    if quartal_dir.strip(): jobs.append(("Quartal", normalize_dir(quartal_dir)))
-    if halbjahr_dir.strip(): jobs.append(("Halbjahr", normalize_dir(halbjahr_dir)))
-    if jahr_dir.strip(): jobs.append(("Jahr", normalize_dir(jahr_dir)))
+    layouts = resolve_layout_paths(layout_dir)
 
-    if not jobs:
-        messagebox.showwarning("Hinweis", "Kein Eingangsverzeichnis gesetzt (Monat/Quartal/Halbjahr/Jahr).")
-        return
+    vo_root = os.path.join(out_base_dir, "VÖ-Tabellen")
+    ensure_dir(vo_root)
+    out_dir = os.path.join(vo_root, period_label)
+    ensure_dir(out_dir)
 
-    logger.log("=== START GUI-Lauf ===")
-    logger.log(f"Layouts:       {layout_dir}")
-    logger.log(f"Ausgabe-Basis: {base_out_dir}")
-    logger.log(f"Protokolle:    {os.path.dirname(logger.path)}")
-    logger.log("Jobs: " + ", ".join([f"{lbl}={path}" for lbl, path in jobs]))
-    logger.log("Überschreiben: JA (vorhandene Ausgaben werden ersetzt)")
+    logger.log(f"[IN] {period_label}: {input_dir}")
+    logger.log(f"[OUT] {out_dir}")
 
-    try:
-        for lbl, in_dir in jobs:
-            status_var.set(f"Starte: {lbl}")
-            logger.log(f"== JOB: {lbl} ==")
-            run_for_one_input_dir(in_dir, base_out_dir, layout_dir, logger, status_var)
+    # Dateien suchen
+    files = {1: None, 2: None, 3: None, 5: None}
+    for f in os.listdir(input_dir):
+        if not f.lower().endswith(".xlsx"):
+            continue
+        lf = f.lower()
+        if lf.startswith("tabelle-1-land") and "_g" not in lf and "_intern" not in lf:
+            files[1] = os.path.join(input_dir, f)
+        elif lf.startswith("tabelle-2-land") and "_g" not in lf and "_intern" not in lf:
+            files[2] = os.path.join(input_dir, f)
+        elif lf.startswith("tabelle-3-land") and "_g" not in lf and "_intern" not in lf:
+            files[3] = os.path.join(input_dir, f)
+        elif lf.startswith("tabelle-5-land") and "_g" not in lf and "_intern" not in lf:
+            files[5] = os.path.join(input_dir, f)
 
-        status_var.set("Fertig.")
-        logger.log("=== ENDE GUI-Lauf ===")
-        messagebox.showinfo("Fertig", f"Verarbeitung abgeschlossen.\nProtokoll:\n{logger.path}")
-    except Exception as e:
-        status_var.set("Fehler – siehe Protokoll.")
-        logger.log(f"[FEHLER] {repr(e)}")
-        messagebox.showerror("Fehler", f"Es ist ein Fehler aufgetreten:\n{e}\n\nProtokoll:\n{logger.path}")
+    # Periode aus Dateiname ableiten (anhand Tabelle 1 wenn möglich)
+    period_token = None
+    if files[1]:
+        period_token = detect_period_from_filename(os.path.basename(files[1]))
+    if not period_token:
+        # fallback: irgendeine
+        for k in (2, 3, 5):
+            if files[k]:
+                period_token = detect_period_from_filename(os.path.basename(files[k]))
+                break
+    if not period_token:
+        period_token = "UNBEKANNT"
+
+    logger.log(f"[PERIODE] {period_token}")
+
+    # Ausgabe-Dateinamen
+    def out_name(table_no, suffix):
+        return os.path.join(out_dir, f"Tabelle-{table_no}-Land_{period_token}{suffix}.xlsx")
+
+    # Tabelle 1
+    if files[1]:
+        tpl_intern = layouts.get(("1", "intern"))
+        tpl_g = layouts.get(("1", "g"))
+        if tpl_intern:
+            process_table1(files[1], tpl_intern, out_name(1, "_INTERN"), True, logger)
+        if tpl_g:
+            process_table1(files[1], tpl_g, out_name(1, "_g"), False, logger)
+
+    # Tabelle 2
+    if files[2]:
+        tpl_intern = layouts.get(("2", "intern"))
+        tpl_g = layouts.get(("2", "g"))
+        if tpl_intern:
+            process_table2_or_3(files[2], tpl_intern, out_name(2, "_INTERN"), True, 2, logger)
+        if tpl_g:
+            process_table2_or_3(files[2], tpl_g, out_name(2, "_g"), False, 2, logger)
+
+    # Tabelle 3
+    if files[3]:
+        tpl_intern = layouts.get(("3", "intern"))
+        tpl_g = layouts.get(("3", "g"))
+        if tpl_intern:
+            process_table2_or_3(files[3], tpl_intern, out_name(3, "_INTERN"), True, 3, logger)
+        if tpl_g:
+            process_table2_or_3(files[3], tpl_g, out_name(3, "_g"), False, 3, logger)
+
+    # Tabelle 5
+    if files[5]:
+        tpl_intern = layouts.get(("5", "intern"))
+        tpl_g = layouts.get(("5", "g"))
+        if tpl_intern:
+            build_table5_workbook(files[5], tpl_intern, out_name(5, "_INTERN"), True, logger)
+        if tpl_g:
+            build_table5_workbook(files[5], tpl_g, out_name(5, "_g"), False, logger)
+
+    logger.log("[FERTIG] Ordner verarbeitet.")
 
 
 # ============================================================
 # GUI
 # ============================================================
 
-def choose_dir(entry: ttk.Entry):
-    d = filedialog.askdirectory()
-    if d:
-        entry.delete(0, tk.END)
-        entry.insert(0, d)
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("VO-Tabellen-Formatter")
+        self.geometry("900x520")
+
+        self.layout_dir = tk.StringVar()
+        self.out_base_dir = tk.StringVar()
+        self.in_month = tk.StringVar()
+        self.in_quarter = tk.StringVar()
+        self.in_half = tk.StringVar()
+        self.in_year = tk.StringVar()
+        self.log_dir = tk.StringVar()
+
+        row = 0
+
+        def add_path_row(label, var, choose_dir=True):
+            nonlocal row
+            tk.Label(self, text=label, anchor="w").grid(row=row, column=0, sticky="ew", padx=8, pady=4)
+            tk.Entry(self, textvariable=var).grid(row=row, column=1, sticky="ew", padx=8, pady=4)
+            btn = tk.Button(self, text="Auswählen...", command=lambda: self.pick_path(var, choose_dir))
+            btn.grid(row=row, column=2, padx=8, pady=4)
+            row += 1
+
+        self.columnconfigure(1, weight=1)
+
+        add_path_row("Layouts-Ordner (enthält Layouts/*.xlsx):", self.layout_dir, True)
+        add_path_row("Ausgabe-Basisordner (VÖ-Tabellen wird darunter angelegt):", self.out_base_dir, True)
+
+        tk.Label(self, text="Eingangsordner (nur gefüllte werden verarbeitet):", anchor="w").grid(row=row, column=0, sticky="ew", padx=8, pady=(12, 4))
+        row += 1
+
+        add_path_row("Monat:", self.in_month, True)
+        add_path_row("Quartal:", self.in_quarter, True)
+        add_path_row("Halbjahr:", self.in_half, True)
+        add_path_row("Jahr:", self.in_year, True)
+
+        add_path_row("Protokoll-Ordner:", self.log_dir, True)
+
+        frm = tk.Frame(self)
+        frm.grid(row=row, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
+        tk.Button(frm, text="Start", command=self.start_run).pack(side="left", padx=5)
+        tk.Button(frm, text="Beenden", command=self.destroy).pack(side="left", padx=5)
+        row += 1
+
+        self.txt = tk.Text(self, height=12)
+        self.txt.grid(row=row, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        self.rowconfigure(row, weight=1)
+
+        self.write("[INFO] GUI bereit.\n")
+
+    def pick_path(self, var, choose_dir=True):
+        if choose_dir:
+            p = filedialog.askdirectory()
+        else:
+            p = filedialog.askopenfilename()
+        if p:
+            var.set(p)
+
+    def write(self, s):
+        self.txt.insert("end", s)
+        self.txt.see("end")
+        self.update_idletasks()
+
+    def start_run(self):
+        global PROTOKOLL_DIR
+        PROTOKOLL_DIR = self.log_dir.get().strip()
+
+        logger = Logger()
+
+        try:
+            layout_dir = self.layout_dir.get().strip()
+            out_base = self.out_base_dir.get().strip()
+
+            if not layout_dir or not os.path.isdir(layout_dir):
+                messagebox.showerror("Fehler", "Bitte Layouts-Ordner auswählen.")
+                return
+            if not out_base or not os.path.isdir(out_base):
+                messagebox.showerror("Fehler", "Bitte Ausgabe-Basisordner auswählen.")
+                return
+
+            # Protokollordner anlegen (wie gefordert)
+            if PROTOKOLL_DIR:
+                ensure_dir(PROTOKOLL_DIR)
+
+            logger.log("Starte VO-Tabellen-Formatter...")
+
+            # Monat
+            if self.in_month.get().strip():
+                run_for_input_folder(self.in_month.get().strip(), out_base, layout_dir,
+                                     os.path.basename(self.in_month.get().strip()), logger)
+            # Quartal
+            if self.in_quarter.get().strip():
+                run_for_input_folder(self.in_quarter.get().strip(), out_base, layout_dir,
+                                     os.path.basename(self.in_quarter.get().strip()), logger)
+            # Halbjahr
+            if self.in_half.get().strip():
+                run_for_input_folder(self.in_half.get().strip(), out_base, layout_dir,
+                                     os.path.basename(self.in_half.get().strip()), logger)
+            # Jahr
+            if self.in_year.get().strip():
+                run_for_input_folder(self.in_year.get().strip(), out_base, layout_dir,
+                                     os.path.basename(self.in_year.get().strip()), logger)
+
+            logger.log("[FERTIG] Verarbeitung abgeschlossen.")
+            self.write("[FERTIG] Verarbeitung abgeschlossen.\n")
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.log("FEHLER:\n" + tb)
+            self.write("\n[FEHLER]\n" + tb + "\n")
+            messagebox.showerror("Fehler", str(e))
 
 
-def start_gui():
-    root = tk.Tk()
-    root.title("VÖ-Tabellen-Formatter (Tabelle 1/2/3/5)")
-
-    frm = ttk.Frame(root, padding=12)
-    frm.grid(row=0, column=0, sticky="nsew")
-
-    root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=1)
-    frm.columnconfigure(1, weight=1)
-
-    entries = {}
-
-    def add_row(r, label, key, default=""):
-        ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=4)
-        e = ttk.Entry(frm, width=90)
-        e.grid(row=r, column=1, sticky="we", padx=6)
-        if default:
-            e.insert(0, default)
-        ttk.Button(frm, text="Auswählen…", command=lambda: choose_dir(e)).grid(row=r, column=2, sticky="e")
-        entries[key] = e
-
-    # Defaults: Layouts neben EXE / Script
-    default_layout = os.path.join(app_base_dir(), "Layouts")
-    default_log = os.path.join(app_base_dir(), "Protokolle")
-
-    add_row(0, "Layouts-Ordner (enthält Layouts/*.xlsx):", "layouts", default_layout)
-    add_row(1, "Ausgabe-Basisordner (VÖ-Tabellen wird darunter angelegt):", "outbase", "")
-    ttk.Label(frm, text="Eingangsordner (nur gefüllte werden verarbeitet):").grid(row=2, column=0, sticky="w", pady=(10, 2), columnspan=3)
-
-    add_row(3, "Monat:", "monat", "")
-    add_row(4, "Quartal:", "quartal", "")
-    add_row(5, "Halbjahr:", "halbjahr", "")
-    add_row(6, "Jahr:", "jahr", "")
-
-    add_row(7, "Protokoll-Ordner:", "logdir", default_log)
-
-    status_var = tk.StringVar(value="Bereit.")
-    ttk.Label(frm, textvariable=status_var).grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
-
-    def on_run():
-        run_processing(
-            entries["layouts"].get(),
-            entries["outbase"].get(),
-            entries["monat"].get(),
-            entries["quartal"].get(),
-            entries["halbjahr"].get(),
-            entries["jahr"].get(),
-            entries["logdir"].get(),
-            status_var
-        )
-
-    btn_row = ttk.Frame(frm)
-    btn_row.grid(row=9, column=0, columnspan=3, sticky="e", pady=10)
-
-    ttk.Button(btn_row, text="Start", command=on_run).grid(row=0, column=0, padx=6)
-    ttk.Button(btn_row, text="Beenden", command=root.destroy).grid(row=0, column=1, padx=6)
-
-    ttk.Label(
-        frm,
-        text="Ausgaben: <Ausgabe-Basis>\\VÖ-Tabellen\\<Eingangsordnername>\\...   |   Rohdateien bleiben unverändert.",
-    ).grid(row=10, column=0, columnspan=3, sticky="w")
-
-    root.mainloop()
+def main():
+    app = App()
+    app.mainloop()
 
 
 if __name__ == "__main__":
-    start_gui()
+    main()
