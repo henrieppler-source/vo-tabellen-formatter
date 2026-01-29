@@ -15,7 +15,7 @@ from tkinter import ttk, filedialog, messagebox
 # FESTE VERZEICHNISSE (wie vorgegeben)
 # ============================================================
 
-PROTOKOLL_DIR = r"L:\Abteilung5\sg52\50_INSO\1_Erhebungen\11_Insolvenzstatistiken\110_52411_BEANTRAGTE\1101_Monatsabschluss\Protokolle"
+PROTOKOLL_DIR = ""  # optional default; if empty -> use output_base\Protokolle
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
@@ -130,15 +130,20 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     current_year = datetime.now().year
 
 
-def ensure_copyright_footer_fixed_row(ws_target, ws_template, stand_text, fixed_row=65):
-    """Ensure a footer exists at a fixed row (default 65):
-    Column A: '(C)opyright <current_year> Bayerisches Landesamt für Statistik'
-    Last data column in that row: 'Stand: dd.mm.yyyy' (right aligned)
-    Styles are copied from the template's copyright row, if available.
+def ensure_copyright_footer_fixed_row(ws_target, ws_template, stand_text, fixed_row=65, stand_row_offset=0):
     """
+    Ensures a footer at a fixed row.
+
+    - Row `fixed_row`, Col A: '(C)opyright <current_year> Bayerisches Landesamt für Statistik'
+    - Row `fixed_row + stand_row_offset`, last data column: 'Stand: dd.mm.yyyy' (right aligned)
+      (If stand_row_offset==0 -> same row as copyright.)
+    - Styles are copied from the template's copyright cell if available.
+    """
+    from datetime import datetime
+
     current_year = datetime.now().year
 
-    # locate style source in template
+    # locate style source in template (copyright cell in col A)
     style_cell = None
     if ws_template is not None:
         for r in range(ws_template.max_row, 0, -1):
@@ -146,32 +151,33 @@ def ensure_copyright_footer_fixed_row(ws_target, ws_template, stand_text, fixed_
             if isinstance(v, str) and "(C)opyright" in v:
                 style_cell = ws_template.cell(row=r, column=1)
                 break
-    # fallback: use target A1
     if style_cell is None:
         style_cell = ws_target.cell(row=1, column=1)
 
-    # Remove other Stand: occurrences (keep only the fixed row)
+    stand_row = fixed_row + int(stand_row_offset or 0)
+
+    # Remove other Stand: occurrences (keep only the chosen stand row)
     for r in range(1, ws_target.max_row + 1):
-        if r == fixed_row:
+        if r == stand_row:
             continue
         for c in range(1, ws_target.max_column + 1):
             v = ws_target.cell(row=r, column=c).value
             if isinstance(v, str) and v.strip().startswith("Stand:"):
                 ws_target.cell(row=r, column=c).value = ""
 
-    # Write copyright
+    # Write copyright safely even if merged
     set_value_merge_safe(ws_target, fixed_row, 1, f"(C)opyright {current_year} Bayerisches Landesamt für Statistik")
-    tgt_c = ws_target.cell(row=fixed_row, column=1)
-    tgt_c.font = copy_style(style_cell.font)
-    tgt_c.border = copy_style(style_cell.border)
-    tgt_c.fill = copy_style(style_cell.fill)
-    tgt_c.number_format = style_cell.number_format
-    tgt_c.protection = copy_style(style_cell.protection)
-    tgt_c.alignment = copy_style(style_cell.alignment) if style_cell.alignment else Alignment(horizontal="left", vertical="center")
+    cop_cell = ws_target.cell(row=fixed_row, column=1)
+    cop_cell.font = copy_style(style_cell.font)
+    cop_cell.border = copy_style(style_cell.border)
+    cop_cell.fill = copy_style(style_cell.fill)
+    cop_cell.number_format = style_cell.number_format
+    cop_cell.protection = copy_style(style_cell.protection)
+    cop_cell.alignment = copy_style(style_cell.alignment) if style_cell.alignment else Alignment(horizontal="left", vertical="center")
 
     # Stand in last data column under the table
-    last_col = get_last_data_col(ws_target, end_row=fixed_row - 1)
-    stand_cell = ws_target.cell(row=fixed_row, column=last_col)
+    last_col = get_last_data_col(ws_target, end_row=max(1, fixed_row - 1))
+    stand_cell = ws_target.cell(row=stand_row, column=last_col)
     stand_cell.value = stand_text or ""
     stand_cell.font = copy_style(style_cell.font)
     stand_cell.border = copy_style(style_cell.border)
@@ -179,51 +185,6 @@ def ensure_copyright_footer_fixed_row(ws_target, ws_template, stand_text, fixed_
     stand_cell.number_format = style_cell.number_format
     stand_cell.protection = copy_style(style_cell.protection)
     stand_cell.alignment = Alignment(horizontal="right", vertical=style_cell.alignment.vertical if style_cell.alignment else "center")
-
-    copyright_row = None
-    for r in range(max_row, 0, -1):
-        v = ws.cell(row=r, column=1).value
-        if isinstance(v, str) and "(C)opyright" in v:
-            new_text = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
-            ws.cell(row=r, column=1).value = new_text
-            copyright_row = r
-            break
-
-    if not copyright_row:
-        return
-
-    # andere Stand:-Zeilen entfernen
-    for r in range(1, max_row + 1):
-        for c in range(1, max_col + 1):
-            v = ws.cell(row=r, column=c).value
-            if isinstance(v, str) and v.strip().startswith("Stand:") and r != copyright_row:
-                ws.cell(row=r, column=c).value = ""
-
-    if not stand_text:
-        return
-
-    # Stand-Spalte finden (oder letzte Spalte)
-    stand_col = None
-    for c in range(1, max_col + 1):
-        v = ws.cell(row=copyright_row, column=c).value
-        if isinstance(v, str) and "Stand:" in v:
-            stand_col = c
-            break
-    if stand_col is None:
-        stand_col = max_col
-
-    cop_cell = ws.cell(row=copyright_row, column=1)
-    tgt = ws.cell(row=copyright_row, column=stand_col)
-    tgt.value = stand_text
-
-    tgt.font = copy_style(cop_cell.font)
-    tgt.border = copy_style(cop_cell.border)
-    tgt.fill = copy_style(cop_cell.fill)
-    tgt.number_format = cop_cell.number_format
-    tgt.protection = copy_style(cop_cell.protection)
-    tgt.alignment = Alignment(horizontal="right",
-                             vertical=cop_cell.alignment.vertical if cop_cell.alignment else "center")
-
 
 def mark_cells_with_1_or_2(ws, col_index, fill):
     for r in range(1, ws.max_row + 1):
@@ -408,7 +369,7 @@ def process_table1_file(raw_path, output_dir, logger: Logger):
 
         # Footer sicherstellen: Zeile 65 (Styles aus INTERN-Layout)
         ws_i = wb_i[wb_i.sheetnames[0]] if wb_i.sheetnames else None
-        ensure_copyright_footer_fixed_row(ws_g, ws_i, stand_text, fixed_row=65)
+        ensure_copyright_footer_fixed_row(ws_g, ws_i, stand_text, fixed_row=65, stand_row_offset=1)
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_g.save(out_g)
@@ -507,7 +468,7 @@ def process_table2_or_3_file(table_no, raw_path, output_dir, logger: Logger):
 
         # Footer sicherstellen: Zeile 65 (Styles aus INTERN-Layout)
         ws_i = wb_i[wb_i.sheetnames[0]] if wb_i.sheetnames else None
-        ensure_copyright_footer_fixed_row(ws_g, ws_i, stand_text, fixed_row=65)
+        ensure_copyright_footer_fixed_row(ws_g, ws_i, stand_text, fixed_row=65, stand_row_offset=1)
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_g.save(out_g)
@@ -644,7 +605,7 @@ def process_table5_file(raw_path, output_dir, logger: Logger):
 
         # Footer sicherstellen: Zeile 65 (Styles aus INTERN-Layout)
         ws_i = wb_i[wb_i.sheetnames[0]] if wb_i.sheetnames else None
-        ensure_copyright_footer_fixed_row(ws_g, ws_i, stand_text, fixed_row=65)
+        ensure_copyright_footer_fixed_row(ws_g, ws_i, stand_text, fixed_row=65, stand_row_offset=1)
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_g.save(out_g)
