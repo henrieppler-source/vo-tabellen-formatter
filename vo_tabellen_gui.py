@@ -177,9 +177,6 @@ def get_merged_secondary_checker(ws):
 
 
 def get_last_data_col(ws, end_row, max_scan_col=30):
-    """
-    Ermittelt die letzte 'echte' Tabellenspalte anhand nicht-leerer Werte oberhalb des Footers.
-    """
     end_row = max(1, end_row)
     last = 1
     max_c = min(max_scan_col, ws.max_column)
@@ -208,7 +205,6 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     if not copyright_row:
         return
 
-    # andere Stand:-Zeilen entfernen
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             v = ws.cell(row=r, column=c).value
@@ -218,7 +214,6 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     if not stand_text:
         return
 
-    # Stand-Spalte finden (oder letzte Datenspalte)
     stand_col = None
     for c in range(1, max_col + 1):
         v = ws.cell(row=copyright_row, column=c).value
@@ -341,9 +336,27 @@ def _find_copyright_row(ws):
     return None
 
 
-def copy_footer_row_from_intern(ws_target, ws_intern, logger=None):
+def clear_existing_footer_markers(ws):
     """
-    Kopiert die komplette Copyright/Stand-Zeile aus _INTERN in die _g-JJ Datei.
+    Löscht vorhandene Copyright/Stand-Textfelder im Zielblatt, damit wir sauber neu setzen können.
+    (Wir löschen nur Inhalte, keine Zeilen/keine Merges.)
+    """
+    max_row = ws.max_row
+    max_col = ws.max_column
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, str):
+                s = v.strip()
+                if "(C)opyright" in s or s.startswith("Stand:"):
+                    # Merge-safe leeren
+                    set_value_merge_safe(ws, r, c, "")
+
+
+def copy_footer_row_from_intern(ws_target, ws_intern, row_shift_up: int = 0, logger=None):
+    """
+    Kopiert die komplette Copyright/Stand-Zeile aus _INTERN in die Ziel-Mappe.
+    Optional: row_shift_up (z.B. 2) => Zielzeile = INTERN-Zeile - 2
     Merge-sicher: wir schreiben nur in die Top-Left-Zellen.
     """
     r_src = _find_copyright_row(ws_intern)
@@ -352,11 +365,11 @@ def copy_footer_row_from_intern(ws_target, ws_intern, logger=None):
             logger.log("[WARN] Keine Copyright-Zeile in _INTERN gefunden – Footer-Kopie übersprungen.")
         return
 
-    r_tgt = r_src  # gleicher Zeilenindex
+    r_tgt = max(1, r_src - int(row_shift_up))
 
     is_sec = get_merged_secondary_checker(ws_target)
-
     max_c = max(ws_intern.max_column, ws_target.max_column)
+
     for c in range(1, max_c + 1):
         if is_sec(r_tgt, c):
             continue
@@ -364,10 +377,8 @@ def copy_footer_row_from_intern(ws_target, ws_intern, logger=None):
         src_cell = ws_intern.cell(row=r_src, column=c)
         val = src_cell.value
 
-        # Wert setzen merge-safe
         set_value_merge_safe(ws_target, r_tgt, c, val)
 
-        # Style übernehmen (auch wenn Zielzelle merged ist -> top-left)
         tl = _merged_top_left(ws_target, r_tgt, c)
         if tl is not None:
             rr, cc = tl
@@ -437,14 +448,12 @@ def process_table1_file(raw_path, output_dir, logger: Logger):
     layout_g = os.path.join(LAYOUT_DIR, TEMPLATES[1]["ext"])
     layout_i = os.path.join(LAYOUT_DIR, TEMPLATES[1]["int"])
 
-    # INTERN immer wie gehabt
     wb_i = build_table1_workbook(raw_path, layout_i, internal_layout=True)
     out_i = os.path.join(output_dir, base + "_INTERN.xlsx")
     wb_i.save(out_i)
     logger.log(f"[T1] INTERN -> {out_i}")
 
     if is_jj:
-        # _g bei JJ: Eingangsdatei als Basis (inkl. J/K), aber Footer aus _INTERN übernehmen (damit exakt korrekt)
         wb_g = openpyxl.load_workbook(raw_path)  # Formate/Merges behalten
         ws_g = wb_g[RAW_SHEET_NAMES[1]]
 
@@ -453,18 +462,18 @@ def process_table1_file(raw_path, output_dir, logger: Logger):
         period_text = find_period_text(ws_raw)
         stand_text = extract_stand_from_raw(ws_raw)
 
-        # Zeitbezug in A3 setzen (JJ: "Jahr 2025")
         if period_text:
             s = str(period_text).strip()
             if re.fullmatch(r"\d{4}", s):
                 s = f"Jahr {s}"
             set_value_merge_safe(ws_g, 3, 1, s)
 
-        # Footer-Zeile aus _INTERN übernehmen (inkl. Copyright-Text + korrekter Positionierung)
+        # NEU: vorhandene Footer-Marker entfernen, dann Footer aus INTERN 2 Zeilen höher einfügen
+        clear_existing_footer_markers(ws_g)
         ws_intern = wb_i[wb_i.sheetnames[0]]
-        copy_footer_row_from_intern(ws_g, ws_intern, logger=logger)
+        copy_footer_row_from_intern(ws_g, ws_intern, row_shift_up=2, logger=logger)
 
-        # Stand + dynamisches Copyright-Jahr sicher aktualisieren (falls Stand aus Eingang abweicht)
+        # Stand + Copyright-Jahr dynamisch aktualisieren
         update_footer_with_stand_and_copyright(ws_g, stand_text)
 
         # Markierung: Spalte G (7) wenn Wert 1 oder 2
@@ -473,7 +482,7 @@ def process_table1_file(raw_path, output_dir, logger: Logger):
 
         out_g = os.path.join(output_dir, base + "_g.xlsx")
         wb_g.save(out_g)
-        logger.log(f"[T1] _g (JJ: Eingang inkl. J/K + Footer aus INTERN + Markierung) -> {out_g}")
+        logger.log(f"[T1] _g (JJ: Footer 2 Zeilen höher + Markierung) -> {out_g}")
 
     else:
         wb_g = build_table1_workbook(raw_path, layout_g, internal_layout=False)
