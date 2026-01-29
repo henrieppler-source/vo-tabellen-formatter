@@ -15,7 +15,7 @@ from tkinter import ttk, filedialog, messagebox
 # FESTE VERZEICHNISSE (wie vorgegeben)
 # ============================================================
 
-PROTOKOLL_DIR = ""  # optional default; if empty -> use output_base\Protokolle
+PROTOKOLL_DIR = "Protokolle"  # Standard: relativ -> neben EXE/WorkingDir
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
@@ -50,23 +50,54 @@ PREFIX_TO_TABLE = {
 # ============================================================
 
 class Logger:
-    def __init__(self):
-        os.makedirs(PROTOKOLL_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        self.path = os.path.join(PROTOKOLL_DIR, f"vo_tabellen_{ts}.log")
+    """Einfacher Logger: schreibt immer in eine Logdatei.
+    Das Zielverzeichnis kann zur Laufzeit umgestellt werden (move_to)."""
+
+    def __init__(self, base_dir: str | None = None):
+        if base_dir is None or str(base_dir).strip() == "":
+            base_dir = os.getcwd()
+        self.base_dir = os.path.normpath(base_dir)
+        if not os.path.isabs(self.base_dir):
+            self.base_dir = os.path.normpath(os.path.join(os.getcwd(), self.base_dir))
+        os.makedirs(self.base_dir, exist_ok=True)
+
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        self.path = os.path.join(self.base_dir, f"vo_tabellen_{ts}.log")
+        self._fh = open(self.path, "a", encoding="utf-8")
+        self.log(f"=== Protokollstart: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+
+    def close(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
 
     def log(self, msg: str):
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{stamp}] {msg}"
-        print(line)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        line = f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+        self._fh.write(line + "\n")
+        self._fh.flush()
 
+    def move_to(self, new_dir: str):
+        """Wechselt das Protokollverzeichnis. Neuer Logfile-Name, weiter schreiben."""
+        new_dir = os.path.normpath(new_dir)
+        if not new_dir:
+            return
+        os.makedirs(new_dir, exist_ok=True)
 
-# ============================================================
-# Excel Helper
-# ============================================================
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        new_path = os.path.join(new_dir, f"vo_tabellen_{ts}.log")
 
+        old_path = getattr(self, "path", None)
+
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+        self.base_dir = new_dir
+        self.path = new_path
+        self._fh = open(self.path, "a", encoding="utf-8")
+        self.log(f"=== Protokoll fortgesetzt (vorher: {old_path}) ===")
 def is_numeric_like(v):
     if v is None:
         return False
