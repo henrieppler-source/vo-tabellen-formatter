@@ -404,6 +404,106 @@ def tab8_update_footer(ws_out, stand_ddmmyyyy: str):
 
     return None
 
+
+
+def tab8_find_footer_block(ws_tpl, max_col: int):
+    """Ermittelt den Footer-Block im Layoutblatt.
+
+    Strategie:
+    - Copyright-Zeile suchen (enthält '(C)opyright')
+    - Von dort nach oben laufen, solange die Zeile in A..max_col Inhalte hat
+      UND Spalte A keine reine Zahl ist (Datenzeile).
+    Rückgabe: (start_row, end_row, stand_row, stand_col, copyright_row, copyright_col)
+    """
+    copyright_row = None
+    copyright_col = None
+    for r in range(ws_tpl.max_row, 0, -1):
+        for c in range(1, ws_tpl.max_column + 1):
+            v = ws_tpl.cell(r, c).value
+            if isinstance(v, str) and "(C)opyright" in v:
+                copyright_row, copyright_col = r, c
+                break
+        if copyright_row:
+            break
+
+    if not copyright_row:
+        # kein Footer gefunden
+        return None
+
+    def row_has_content(rr: int) -> bool:
+        for cc in range(1, max_col + 1):
+            v = ws_tpl.cell(rr, cc).value
+            if v not in (None, ""):
+                return True
+        return False
+
+    def is_data_row(rr: int) -> bool:
+        v = ws_tpl.cell(rr, 1).value
+        if isinstance(v, (int, float)):
+            return True
+        if isinstance(v, str):
+            s = v.strip()
+            return s.isdigit()
+        return False
+
+    start = copyright_row
+    while start > 1 and row_has_content(start - 1) and not is_data_row(start - 1):
+        start -= 1
+
+    # Stand-Zelle im Footerblock suchen
+    stand_row = None
+    stand_col = None
+    for r in range(copyright_row, start - 1, -1):
+        for c in range(max_col, 0, -1):
+            v = ws_tpl.cell(r, c).value
+            if isinstance(v, str) and "Stand:" in v:
+                stand_row, stand_col = r, c
+                break
+        if stand_row:
+            break
+
+    return (start, copyright_row, stand_row, stand_col, copyright_row, copyright_col)
+
+
+def tab8_restore_footer_from_template(ws_out, ws_tpl, max_col: int):
+    """Stellt Footer (inkl. Fußnote) aus dem Layoutblatt wieder her (Werte + Styles).
+    Merges sind im ws_out bereits vorhanden, da ws_out vom Layout kommt.
+    """
+    info = tab8_find_footer_block(ws_tpl, max_col)
+    if not info:
+        return None
+    start, end, stand_row, stand_col, c_row, c_col = info
+
+    is_sec = get_merged_secondary_checker(ws_out)
+
+    for rr in range(start, end + 1):
+        for cc in range(1, max_col + 1):
+            if is_sec(rr, cc):
+                continue
+            src = ws_tpl.cell(rr, cc)
+            dst = ws_out.cell(rr, cc)
+            dst.value = src.value
+            try:
+                dst.font = copy_style(src.font)
+                dst.border = copy_style(src.border)
+                dst.fill = copy_style(src.fill)
+                dst.number_format = src.number_format
+                dst.protection = copy_style(src.protection)
+                dst.alignment = copy_style(src.alignment)
+            except Exception:
+                pass
+
+    return info
+
+
+def tab8_clear_all_stand(ws_out):
+    """Entfernt alle 'Stand:' Vorkommen im Blatt."""
+    for row in ws_out.iter_rows():
+        for cell in row:
+            v = cell.value
+            if isinstance(v, str) and "Stand:" in v:
+                cell.value = None
+
 def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     """Füllt ein Layout-Blatt mit den Daten aus raw_path (Spaltenbegrenzung: M=13 oder N=14)."""
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
@@ -568,6 +668,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             out_name = f"Tabelle-8-Land_{token}_g.xlsx"
 
         wb_out = openpyxl.load_workbook(layout_path, rich_text=True)
+        wb_tpl = openpyxl.load_workbook(layout_path, rich_text=True)
         # Erwartet 4 Sheets (25..28). Wir mappen nach Index, notfalls nach Namen.
         ws_map = {}
         for ws in wb_out.worksheets:
@@ -581,6 +682,16 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             for idx, nr in enumerate([25,26,27,28]):
                 ws_map.setdefault(nr, wb_out.worksheets[idx])
 
+
+        # Template-Map (pristine Layout) für Footer/Fußnoten
+        tpl_map = {}
+        for ws in wb_tpl.worksheets:
+            m2 = re.match(r"^(25|26|27|28)_Tab8_", ws.title)
+            if m2:
+                tpl_map[int(m2.group(1))] = ws
+        if len(tpl_map) < 4 and len(wb_tpl.worksheets) >= 4:
+            for idx2, nr2 in enumerate([25,26,27,28]):
+                tpl_map.setdefault(nr2, wb_tpl.worksheets[idx2])
         # Absicherung: Layout muss 4 Blätter hergeben
         still_missing = [nr for nr in [25, 26, 27, 28] if nr not in ws_map]
         if still_missing:
@@ -601,21 +712,41 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                 pass
             fill_tab8_sheet(ws_out, raw_path, max_col, logger)
 
+            # Footer (inkl. Fußnote) aus Layout wiederherstellen
+            tpl_ws = tpl_map.get(nr)
+            if tpl_ws is not None:
+                tab8_restore_footer_from_template(ws_out, tpl_ws, max_col)
+
             # Footer/Stand je Blatt aktualisieren (Copyright-Jahr + Stand, falls vorhanden)
             stand_coord = tab8_update_footer(ws_out, stand)
             if nr == 25 and stand_coord:
                 stand_row = stand_coord[0]
 
-        # Stand muss auf ALLEN 4 Blättern stehen (unter der letzten Spalte M bzw. N).
-        if stand_row is not None:
+                # Stand muss auf ALLEN 4 Blättern genau EINMAL stehen (unter letzter Spalte M bzw. N).
+        # Vorgehen:
+        # - Zielkoordinate aus Template-Blatt 25 (Stand-Zelle im Footerblock) bestimmen
+        # - In jedem Blatt alle Stand:-Vorkommen entfernen
+        # - Stand an Zielkoordinate setzen (Style von Template/Blatt 25 übernehmen)
+        tpl_ws25 = tpl_map.get(25)
+        stand_target = None
+        if tpl_ws25 is not None:
+            info = tab8_find_footer_block(tpl_ws25, max_col)
+            if info and info[2] is not None and info[3] is not None:
+                stand_target = (info[2], max_col)  # Stand immer unter letzter Spalte
+        if stand_target is None and stand_row is not None:
+            stand_target = (stand_row, max_col)
+
+        if stand_target is not None:
+            tr, tc = stand_target
             ref_ws = ws_map[25]
-            ref_cell = ref_ws.cell(row=stand_row, column=max_col)
+            ref_cell = ref_ws.cell(row=tr, column=tc)
 
-            for nr in [26,27,28]:
+            for nr in [25,26,27,28]:
                 ws_out = ws_map[nr]
-                tgt_cell = ws_out.cell(row=stand_row, column=max_col)
+                tab8_clear_all_stand(ws_out)
+                tgt_cell = ws_out.cell(row=tr, column=tc)
 
-                # Style vom Referenzblatt übernehmen (damit es im Layout-Stil bleibt)
+                # Style vom Referenzblatt übernehmen
                 try:
                     tgt_cell.font = copy_style(ref_cell.font)
                     tgt_cell.border = copy_style(ref_cell.border)
@@ -627,8 +758,6 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                     pass
 
                 tgt_cell.value = f"Stand: {stand}"
-
-        out_path = os.path.join(out_dir, out_name)
         wb_out.save(out_path)
         logger.log(f"[TAB8] _g -> {out_path}")
 
