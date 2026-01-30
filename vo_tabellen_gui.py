@@ -758,6 +758,8 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                     pass
 
                 tgt_cell.value = f"Stand: {stand}"
+        out_path = os.path.join(out_dir, out_name)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
         wb_out.save(out_path)
         logger.log(f"[TAB8] _g -> {out_path}")
 
