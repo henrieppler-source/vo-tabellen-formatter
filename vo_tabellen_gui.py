@@ -253,18 +253,39 @@ def resolve_layout_path(candidates):
     return None
 
 def parse_tab8_token(token: str):
-    """Erkennt Monats-/Quartals-/Halbjahres-/JJ-Token aus Dateinamens-Token."""
+    """Erkennt Monats-/Quartals-/Halbjahres-/JJ-Token aus Dateinamens-Token.
+
+    Unterstützt beide Varianten:
+      - ohne Jahr: Q4, H2
+      - mit Jahr:  2025-Q4, 2025-H2
+      - Monat:     2025-11
+      - Jahr:      2025-JJ
+    """
     token = token.strip()
+
+    # Monat: YYYY-MM
     if re.fullmatch(r"\d{4}-\d{2}", token):
         return ("monat", token)
-    if re.fullmatch(r"Q[1-4]", token, flags=re.IGNORECASE):
-        return ("quartal", token.upper())
-    if re.fullmatch(r"H[12]", token, flags=re.IGNORECASE):
-        return ("halbjahr", token.upper())
+
+    # Quartal: Q1..Q4 oder YYYY-Qx
+    m = re.fullmatch(r"(?:(\d{4})-)?Q([1-4])", token, flags=re.IGNORECASE)
+    if m:
+        year = m.group(1)
+        q = f"Q{m.group(2)}"
+        return ("quartal", f"{year}-{q}" if year else q)
+
+    # Halbjahr: H1/H2 oder YYYY-Hx
+    m = re.fullmatch(r"(?:(\d{4})-)?H([12])", token, flags=re.IGNORECASE)
+    if m:
+        year = m.group(1)
+        h = f"H{m.group(2)}"
+        return ("halbjahr", f"{year}-{h}" if year else h)
+
+    # Jahr: YYYY-JJ
     if re.fullmatch(r"\d{4}-JJ", token, flags=re.IGNORECASE):
-        # Ausgabe exakt wie in der Datei (JJ groß)
         y = token[:4]
         return ("jj", f"{y}-JJ")
+
     return (None, token)
 
 def get_file_stand_date(paths):
@@ -292,23 +313,60 @@ def tab8_find_title_cell(ws_raw):
     return v if isinstance(v, str) else None
 
 def tab8_detect_data_block(ws_raw):
-    """Ermittelt (first_data_row, last_data_row, footer_row) anhand Schl.-Nr. in Spalte A und Trenner '—' in Spalte A."""
-    first = None
-    for r in range(1, ws_raw.max_row + 1):
-        v = ws_raw.cell(row=r, column=1).value
-        if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
-            first = r
-            break
+    """Ermittelt (first_data_row, last_data_row, footer_row).
+
+    Besonderheit: In den Eingangsdateien steht in Zeile 1 / Spalte A häufig nur die
+    Blattnummer (25/26/27/28). Diese darf NICHT als Datenbeginn interpretiert werden.
+
+    Heuristik:
+      1) Suche die Kopfzeile mit "Schl.-" (meist "Schl.-Nr.") in Spalte A.
+      2) Datenbeginn = erste numerische Schl.-Nr. NACH dieser Kopfzeile.
+      3) Footer = Trennerzeile (—-_) in Spalte A.
+      4) Fallbacks, falls Kopfzeile nicht gefunden wird.
+    """
+
+    # Footer-Trenner suchen
     footer = None
     for r in range(ws_raw.max_row, 0, -1):
         v = ws_raw.cell(row=r, column=1).value
         if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
             footer = r
             break
-    if first is None:
-        first = 1
     if footer is None:
         footer = ws_raw.max_row + 1
+
+    # Kopfzeile "Schl.-Nr." suchen (Spalte A)
+    header_row = None
+    for r in range(1, min(ws_raw.max_row, 80) + 1):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str):
+            s = v.replace("\n", " ").strip().lower()
+            if "schl" in s and "nr" in s:
+                header_row = r
+                break
+
+    # Datenbeginn: erste numerische Schl.-Nr. nach header_row
+    first = None
+    start_scan = (header_row + 1) if header_row else 1
+    for r in range(start_scan, min(footer, ws_raw.max_row + 1)):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, (int, float)):
+            # 25/26/27/28-Marker in den ersten Zeilen ignorieren
+            if header_row is None and r <= 3 and int(v) in (25, 26, 27, 28):
+                continue
+            first = r
+            break
+        if isinstance(v, str) and v.strip().isdigit():
+            iv = int(v.strip())
+            if header_row is None and r <= 3 and iv in (25, 26, 27, 28):
+                continue
+            first = r
+            break
+
+    if first is None:
+        # Sehr defensiver Fallback: nimm header_row+1 oder 1
+        first = (header_row + 1) if header_row else 1
+
     last = max(first, footer - 1)
     return first, last, footer
 
