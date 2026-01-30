@@ -371,21 +371,38 @@ def tab8_detect_data_block(ws_raw):
     return first, last, footer
 
 def tab8_update_footer(ws_out, stand_ddmmyyyy: str):
-    """Setzt Copyright-Jahr auf aktuelles Jahr und Stand: dd.mm.yyyy (wie im Layout)."""
+    """Setzt Copyright-Jahr auf aktuelles Jahr und Stand: dd.mm.yyyy (wie im Layout).
+
+    Rückgabe:
+        (stand_row, stand_col) falls eine Stand-Zelle gefunden wurde, sonst None.
+    """
     current_year = datetime.now().year
-    # Copyright irgendwo in Spalte A suchen
+
+    # Copyright-Zelle suchen (irgendwo im Blatt) und Jahr ersetzen
+    found_copyright = False
     for r in range(ws_out.max_row, 0, -1):
-        v = ws_out.cell(row=r, column=1).value
-        if isinstance(v, str) and "(C)opyright" in v:
-            ws_out.cell(row=r, column=1).value = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
+        for c in range(1, ws_out.max_column + 1):
+            v = ws_out.cell(row=r, column=c).value
+            if isinstance(v, str) and "(C)opyright" in v:
+                ws_out.cell(row=r, column=c).value = re.sub(
+                    r"\(C\)opyright\s+\d{4}",
+                    f"(C)opyright {current_year}",
+                    v
+                )
+                found_copyright = True
+                break
+        if found_copyright:
             break
-    # Stand-Zelle suchen (oft letzte Spalte, letzte Zeile)
+
+    # Stand-Zelle suchen und Datum setzen
     for r in range(ws_out.max_row, 0, -1):
         for c in range(ws_out.max_column, 0, -1):
             v = ws_out.cell(row=r, column=c).value
             if isinstance(v, str) and "Stand:" in v:
                 ws_out.cell(row=r, column=c).value = f"Stand: {stand_ddmmyyyy}"
-                return
+                return (r, c)
+
+    return None
 
 def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     """Füllt ein Layout-Blatt mit den Daten aus raw_path (Spaltenbegrenzung: M=13 oder N=14)."""
@@ -399,6 +416,26 @@ def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     title = tab8_find_title_cell(ws_raw)
     if title:
         set_value_merge_safe(ws_out, 3, 1, title)
+
+    # Tabellenüberschrift (Zeile 3) fett wie im Layout-Blatt 1
+    try:
+        # Wenn A3 Teil eines Merges ist: alle Zellen im Merge fett setzen
+        applied = False
+        for r in ws_out.merged_cells.ranges:
+            if r.min_row <= 3 <= r.max_row and r.min_col <= 1 <= r.max_col:
+                for rr in range(r.min_row, r.max_row + 1):
+                    for cc in range(r.min_col, r.max_col + 1):
+                        cell = ws_out.cell(row=rr, column=cc)
+                        cell.font = copy_style(cell.font)
+                        cell.font = cell.font.copy(bold=True)
+                applied = True
+                break
+        if not applied:
+            c = ws_out.cell(row=3, column=1)
+            c.font = copy_style(c.font)
+            c.font = c.font.copy(bold=True)
+    except Exception:
+        pass
 
     # A1 muss leer sein
     set_value_merge_safe(ws_out, 1, 1, None)
@@ -416,15 +453,35 @@ def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     if f_out is None:
         f_out = f_raw
 
-    # Ziel-Footer: Trennzeile '—' in Spalte A
+    # Ziel-Footer: Begrenzung des Datenbereichs im Layout.
+    # Tabelle 8 kann auf Blatt 2..4 KEINE Trennzeile (—) haben. Daher:
+    #   1) bevorzugt Copyright-Zeile (irgendwo im Blatt)
+    #   2) sonst Trennzeile '—' in Spalte A
     footer_out = None
+
+    # 1) Copyright-Zeile finden
     for r in range(ws_out.max_row, 0, -1):
-        v = ws_out.cell(row=r, column=1).value
-        if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
-            footer_out = r
+        row_has_c = False
+        for c in range(1, ws_out.max_column + 1):
+            v = ws_out.cell(row=r, column=c).value
+            if isinstance(v, str) and "(C)opyright" in v:
+                footer_out = r
+                row_has_c = True
+                break
+        if row_has_c:
             break
+
+    # 2) Fallback: Trennzeile in Spalte A
+    if footer_out is None:
+        for r in range(ws_out.max_row, 0, -1):
+            v = ws_out.cell(row=r, column=1).value
+            if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
+                footer_out = r
+                break
+
     if footer_out is None:
         footer_out = ws_out.max_row + 1
+
 
     is_sec = get_merged_secondary_checker(ws_out)
 
@@ -510,7 +567,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             max_col = 13  # bis M
             out_name = f"Tabelle-8-Land_{token}_g.xlsx"
 
-        wb_out = openpyxl.load_workbook(layout_path)
+        wb_out = openpyxl.load_workbook(layout_path, rich_text=True)
         # Erwartet 4 Sheets (25..28). Wir mappen nach Index, notfalls nach Namen.
         ws_map = {}
         for ws in wb_out.worksheets:
@@ -533,6 +590,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             )
 
         # Füllen + umbenennen
+        stand_row = None  # Stand-Zeile aus Blatt 1 merken (falls Layout Stand nur dort hat)
         for nr in [25,26,27,28]:
             ws_out = ws_map[nr]
             raw_path = parts[nr]
@@ -543,8 +601,32 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                 pass
             fill_tab8_sheet(ws_out, raw_path, max_col, logger)
 
-            # Footer/Stand je Blatt aktualisieren
-            tab8_update_footer(ws_out, stand)
+            # Footer/Stand je Blatt aktualisieren (Copyright-Jahr + Stand, falls vorhanden)
+            stand_coord = tab8_update_footer(ws_out, stand)
+            if nr == 25 and stand_coord:
+                stand_row = stand_coord[0]
+
+        # Stand muss auf ALLEN 4 Blättern stehen (unter der letzten Spalte M bzw. N).
+        if stand_row is not None:
+            ref_ws = ws_map[25]
+            ref_cell = ref_ws.cell(row=stand_row, column=max_col)
+
+            for nr in [26,27,28]:
+                ws_out = ws_map[nr]
+                tgt_cell = ws_out.cell(row=stand_row, column=max_col)
+
+                # Style vom Referenzblatt übernehmen (damit es im Layout-Stil bleibt)
+                try:
+                    tgt_cell.font = copy_style(ref_cell.font)
+                    tgt_cell.border = copy_style(ref_cell.border)
+                    tgt_cell.fill = copy_style(ref_cell.fill)
+                    tgt_cell.number_format = ref_cell.number_format
+                    tgt_cell.protection = copy_style(ref_cell.protection)
+                    tgt_cell.alignment = copy_style(ref_cell.alignment)
+                except Exception:
+                    pass
+
+                tgt_cell.value = f"Stand: {stand}"
 
         out_path = os.path.join(out_dir, out_name)
         wb_out.save(out_path)
