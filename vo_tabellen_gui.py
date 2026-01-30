@@ -49,6 +49,7 @@ RAW_SHEET_NAMES = {
     2: "XML-Tab2-Land",
     3: "XML-Tab3-Land",
     5: "XML-Tab5-Land",
+    8: "XML-Tab8-Land",
 }
 
 TEMPLATES = {
@@ -236,6 +237,241 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
         horizontal="right",
         vertical=cop_cell.alignment.vertical if cop_cell.alignment else "center"
     )
+
+# ============================================================
+# Tabelle 8 (_g) – Batch-Verarbeitung 25..28_Tab8_*
+# ============================================================
+
+TAB8_FILE_RE = re.compile(r"^(?P<nr>25|26|27|28)_Tab8_(?P<token>.+)\.xlsx$", re.IGNORECASE)
+
+def resolve_layout_path(candidates):
+    """Nimmt die erste existierende Layout-Datei aus candidates (relativ zu LAYOUT_DIR)."""
+    for name in candidates:
+        p = os.path.join(LAYOUT_DIR, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+def parse_tab8_token(token: str):
+    """Erkennt Monats-/Quartals-/Halbjahres-/JJ-Token aus Dateinamens-Token."""
+    token = token.strip()
+    if re.fullmatch(r"\d{4}-\d{2}", token):
+        return ("monat", token)
+    if re.fullmatch(r"Q[1-4]", token, flags=re.IGNORECASE):
+        return ("quartal", token.upper())
+    if re.fullmatch(r"H[12]", token, flags=re.IGNORECASE):
+        return ("halbjahr", token.upper())
+    if re.fullmatch(r"\d{4}-JJ", token, flags=re.IGNORECASE):
+        # Ausgabe exakt wie in der Datei (JJ groß)
+        y = token[:4]
+        return ("jj", f"{y}-JJ")
+    return (None, token)
+
+def get_file_stand_date(paths):
+    """Stand-Datum (dd.mm.yyyy) aus Dateizeitstempeln: nimmt den neuesten mtime-Wert."""
+    mt = 0.0
+    for p in paths:
+        try:
+            mt = max(mt, os.path.getmtime(p))
+        except Exception:
+            pass
+    if mt <= 0:
+        dt = datetime.now()
+    else:
+        dt = datetime.fromtimestamp(mt)
+    return dt.strftime("%d.%m.%Y")
+
+def tab8_find_title_cell(ws_raw):
+    """Sucht eine Titelzelle (typisch A3) und gibt den Text zurück."""
+    for r in range(1, 25):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip().startswith("8.") and "Unternehmensinsolvenzen" in v:
+            return v
+    # Fallback: A3
+    v = ws_raw.cell(row=3, column=1).value
+    return v if isinstance(v, str) else None
+
+def tab8_detect_data_block(ws_raw):
+    """Ermittelt (first_data_row, last_data_row, footer_row) anhand Schl.-Nr. in Spalte A und Trenner '—' in Spalte A."""
+    first = None
+    for r in range(1, ws_raw.max_row + 1):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
+            first = r
+            break
+    footer = None
+    for r in range(ws_raw.max_row, 0, -1):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
+            footer = r
+            break
+    if first is None:
+        first = 1
+    if footer is None:
+        footer = ws_raw.max_row + 1
+    last = max(first, footer - 1)
+    return first, last, footer
+
+def tab8_update_footer(ws_out, stand_ddmmyyyy: str):
+    """Setzt Copyright-Jahr auf aktuelles Jahr und Stand: dd.mm.yyyy (wie im Layout)."""
+    current_year = datetime.now().year
+    # Copyright irgendwo in Spalte A suchen
+    for r in range(ws_out.max_row, 0, -1):
+        v = ws_out.cell(row=r, column=1).value
+        if isinstance(v, str) and "(C)opyright" in v:
+            ws_out.cell(row=r, column=1).value = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
+            break
+    # Stand-Zelle suchen (oft letzte Spalte, letzte Zeile)
+    for r in range(ws_out.max_row, 0, -1):
+        for c in range(ws_out.max_column, 0, -1):
+            v = ws_out.cell(row=r, column=c).value
+            if isinstance(v, str) and "Stand:" in v:
+                ws_out.cell(row=r, column=c).value = f"Stand: {stand_ddmmyyyy}"
+                return
+
+def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
+    """Füllt ein Layout-Blatt mit den Daten aus raw_path (Spaltenbegrenzung: M=13 oder N=14)."""
+    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
+    # Sheetwahl: bevorzugt XML-Tab8-Land, sonst erstes Blatt
+    if 8 in RAW_SHEET_NAMES and RAW_SHEET_NAMES[8] in wb_raw.sheetnames:
+        ws_raw = wb_raw[RAW_SHEET_NAMES[8]]
+    else:
+        ws_raw = wb_raw[wb_raw.sheetnames[0]]
+
+    title = tab8_find_title_cell(ws_raw)
+    if title:
+        set_value_merge_safe(ws_out, 3, 1, title)
+
+    # A1 muss leer sein
+    set_value_merge_safe(ws_out, 1, 1, None)
+
+    # Datenblock erkennen (raw) + (out)
+    f_raw, l_raw, footer_raw = tab8_detect_data_block(ws_raw)
+
+    # Ziel-Start: erste numerische Schl.-Nr. im Layout (Spalte A)
+    f_out = None
+    for r in range(1, ws_out.max_row + 1):
+        v = ws_out.cell(row=r, column=1).value
+        if isinstance(v, (int, float)) or (isinstance(v, str) and str(v).strip().isdigit()):
+            f_out = r
+            break
+    if f_out is None:
+        f_out = f_raw
+
+    # Ziel-Footer: Trennzeile '—' in Spalte A
+    footer_out = None
+    for r in range(ws_out.max_row, 0, -1):
+        v = ws_out.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
+            footer_out = r
+            break
+    if footer_out is None:
+        footer_out = ws_out.max_row + 1
+
+    is_sec = get_merged_secondary_checker(ws_out)
+
+    # Vorherige Beispielfüllung löschen im Zielbereich
+    for rr in range(f_out, footer_out):
+        for cc in range(1, max_data_col + 1):
+            if not is_sec(rr, cc):
+                set_value_merge_safe(ws_out, rr, cc, None)
+
+    # Kopieren: Zeile für Zeile
+    raw_r = f_raw
+    out_r = f_out
+    while raw_r <= l_raw and out_r < footer_out:
+        for cc in range(1, max_data_col + 1):
+            if is_sec(out_r, cc):
+                continue
+            set_value_merge_safe(ws_out, out_r, cc, ws_raw.cell(row=raw_r, column=cc).value)
+        raw_r += 1
+        out_r += 1
+
+def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var: tk.StringVar):
+    """Findet 25..28_Tab8_*.xlsx in input_dir, gruppiert nach Zeitraum und erzeugt _g-Dateien."""
+    candidates = glob.glob(os.path.join(input_dir, "*_Tab8_*.xlsx"))
+    tab8 = {}
+    for p in candidates:
+        base = os.path.splitext(os.path.basename(p))[0]
+        m = TAB8_FILE_RE.match(os.path.basename(p))
+        if not m:
+            continue
+        nr = int(m.group("nr"))
+        token = m.group("token")
+        kind, norm_token = parse_tab8_token(token)
+        if kind is None:
+            logger.log(f"[TAB8][SKIP] Unbekannter Zeitraum-Token in {os.path.basename(p)}")
+            continue
+        key = (kind, norm_token)
+        tab8.setdefault(key, {})[nr] = p
+
+    if not tab8:
+        return
+
+    # Layouts auflösen
+    layout_g = resolve_layout_path(["Layout_Tab8_g.xlsx", "Tabelle-8-Layout_g.xlsx", TEMPLATES[8].get("ext","")])
+    layout_jj = resolve_layout_path(["Layout_Tab8_JJ_g.xlsx", "Tabelle-8-Layout_JJ_g.xlsx", TEMPLATES[8].get("ext_jj","")])
+
+    if not layout_g:
+        raise FileNotFoundError("Layout für Tabelle 8 (_g) fehlt. Erwartet z.B. Layout_Tab8_g.xlsx oder Tabelle-8-Layout_g.xlsx in ./Layouts")
+    if not layout_jj:
+        logger.log("[TAB8][WARN] JJ-Layout fehlt (Layout_Tab8_JJ_g.xlsx). JJ-Dateien werden übersprungen, bis das Layout vorhanden ist.")
+
+    for (kind, token), parts in sorted(tab8.items()):
+        needed = [25,26,27,28]
+        missing = [n for n in needed if n not in parts]
+        if missing:
+            logger.log(f"[TAB8][SKIP] Zeitraum {token}: es fehlen Dateien: {', '.join(map(str, missing))}")
+            continue
+
+        status_var.set(f"Tabelle 8 ({token})")
+        logger.log(f"[TAB8] Zeitraum {token} ({kind}) – baue _g")
+
+        stand = get_file_stand_date([parts[n] for n in needed])
+
+        if kind == "jj":
+            if not layout_jj:
+                continue
+            layout_path = layout_jj
+            max_col = 14  # bis N
+            out_name = f"Tabelle-8-Land_{token}_g.xlsx"
+        else:
+            layout_path = layout_g
+            max_col = 13  # bis M
+            out_name = f"Tabelle-8-Land_{token}_g.xlsx"
+
+        wb_out = openpyxl.load_workbook(layout_path)
+        # Erwartet 4 Sheets (25..28). Wir mappen nach Index, notfalls nach Namen.
+        ws_map = {}
+        for ws in wb_out.worksheets:
+            # Sheetname beginnt typischerweise mit 25_Tab8...
+            m2 = re.match(r"^(25|26|27|28)_Tab8_", ws.title)
+            if m2:
+                ws_map[int(m2.group(1))] = ws
+
+        # Fallback: erste 4 Sheets in Reihenfolge 25..28
+        if len(ws_map) < 4 and len(wb_out.worksheets) >= 4:
+            for idx, nr in enumerate([25,26,27,28]):
+                ws_map.setdefault(nr, wb_out.worksheets[idx])
+
+        # Füllen + umbenennen
+        for nr in [25,26,27,28]:
+            ws_out = ws_map[nr]
+            raw_path = parts[nr]
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            try:
+                ws_out.title = base  # z.B. 25_Tab8_2025-11
+            except Exception:
+                pass
+            fill_tab8_sheet(ws_out, raw_path, max_col, logger)
+
+            # Footer/Stand je Blatt aktualisieren
+            tab8_update_footer(ws_out, stand)
+
+        out_path = os.path.join(out_dir, out_name)
+        wb_out.save(out_path)
+        logger.log(f"[TAB8] _g -> {out_path}")
+
 
 
 def mark_cells_with_1_or_2(ws, col_index, fill):
@@ -729,18 +965,20 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
     logger.log(f"--- Ausgabe: {out_dir}")
 
     files = find_raw_files(input_dir)
-    if not files:
+    has_tab8 = bool(glob.glob(os.path.join(input_dir, "*_Tab8_*.xlsx")))
+    if not files and not has_tab8:
         logger.log(f"[INFO] Keine passenden Rohdateien gefunden in: {input_dir}")
         return
 
-    missing_layouts = []
-    for t in (1, 2, 3, 5):
-        for k in ("ext", "int"):
-            p = os.path.join(LAYOUT_DIR, TEMPLATES[t][k])
-            if not os.path.exists(p):
-                missing_layouts.append(p)
-    if missing_layouts:
-        raise FileNotFoundError("Layout-Dateien fehlen:\n" + "\n".join(missing_layouts))
+    if files:
+        missing_layouts = []
+        for t in (1, 2, 3, 5):
+            for k in ("ext", "int"):
+                p = os.path.join(LAYOUT_DIR, TEMPLATES[t][k])
+                if not os.path.exists(p):
+                    missing_layouts.append(p)
+        if missing_layouts:
+            raise FileNotFoundError("Layout-Dateien fehlen:\n" + "\n".join(missing_layouts))
 
     for f in files:
         fname = os.path.basename(f)
@@ -765,6 +1003,14 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
             process_table5_file(f, out_dir, logger)
 
         logger.log(f"[OK]    {fname}")
+
+    # Tabelle 8 (_g): 25..28_Tab8_*.xlsx als Batch (4 Blätter in 1 Datei)
+    try:
+        process_tab8_in_dir(input_dir, out_dir, logger, status_var)
+    except Exception as e:
+        logger.log(f"[TAB8][FEHLER] {e}")
+        raise
+
 
 
 def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir, logger: Logger, status_var: tk.StringVar):
