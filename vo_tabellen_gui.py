@@ -728,14 +728,50 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         # - In jedem Blatt alle Stand:-Vorkommen entfernen
         # - Stand an Zielkoordinate setzen (Style von Template/Blatt 25 übernehmen)
         tpl_ws25 = tpl_map.get(25)
-        stand_target = None
-        if tpl_ws25 is not None:
-            info = tab8_find_footer_block(tpl_ws25, max_col)
-            if info and info[2] is not None and info[3] is not None:
-                stand_target = (info[2], max_col)  # Stand immer unter letzter Spalte
-        if stand_target is None and stand_row is not None:
-            stand_target = (stand_row, max_col)
+stand_target = None
+copyright_row = None
 
+# Ziel: Stand muss in die Copyright-Zeile (wie im Layout) – unter die letzte Spalte (M bzw. N).
+if tpl_ws25 is not None:
+    info = tab8_find_footer_block(tpl_ws25, max_col)
+    if info:
+        # info: (start_row, end_row, stand_row, stand_col, copyright_row, copyright_col)
+        copyright_row = info[4]
+        if copyright_row is not None:
+            stand_target = (copyright_row, max_col)
+
+# Fallback: falls Footerblock nicht ermittelbar ist, nehme die gefundene Stand-Zeile aus Blatt 1
+if stand_target is None and stand_row is not None:
+    stand_target = (stand_row, max_col)
+
+if stand_target is not None:
+    tr, tc = stand_target
+
+    # Referenz-Style von Blatt 25 an genau dieser Zielzelle (kommt aus dem Layout)
+    ref_ws = ws_map[25]
+    ref_cell = ref_ws.cell(row=tr, column=tc)
+
+    for nr in [25, 26, 27, 28]:
+        ws_out = ws_map[nr]
+
+        # Vorbelegen: alle Stand:-Vorkommen weg, damit es keine Duplikate gibt
+        tab8_clear_all_stand(ws_out)
+
+        tgt_cell = ws_out.cell(row=tr, column=tc)
+
+        # Style vom Referenzblatt übernehmen
+        try:
+            tgt_cell.font = copy_style(ref_cell.font)
+            tgt_cell.border = copy_style(ref_cell.border)
+            tgt_cell.fill = copy_style(ref_cell.fill)
+            tgt_cell.number_format = ref_cell.number_format
+            tgt_cell.protection = copy_style(ref_cell.protection)
+            tgt_cell.alignment = copy_style(ref_cell.alignment)
+        except Exception:
+            pass
+
+        # WERT immer aus Dateidatum (stand) setzen – niemals aus Layout übernehmen
+        tgt_cell.value = f"Stand: {stand}"
         if stand_target is not None:
             tr, tc = stand_target
             ref_ws = ws_map[25]
