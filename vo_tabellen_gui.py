@@ -388,8 +388,20 @@ def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
         out_r += 1
 
 def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var: tk.StringVar):
-    """Findet 25..28_Tab8_*.xlsx in input_dir, gruppiert nach Zeitraum und erzeugt _g-Dateien."""
-    candidates = glob.glob(os.path.join(input_dir, "*_Tab8_*.xlsx"))
+    """Findet 25..28_Tab8_*.xlsx und erzeugt _g-Dateien.
+
+    WICHTIG: Bei euch liegen Tab8/Tab9 oft in einem Unterordner 'Tab-8-9'.
+    Daher wird sowohl im input_dir als auch in input_dir/Tab-8-9 gesucht.
+    """
+
+    search_dirs = [input_dir]
+    sub = os.path.join(input_dir, "Tab-8-9")
+    if os.path.isdir(sub):
+        search_dirs.append(sub)
+
+    candidates = []
+    for d in search_dirs:
+        candidates.extend(glob.glob(os.path.join(d, "*_Tab8_*.xlsx")))
     tab8 = {}
     for p in candidates:
         base = os.path.splitext(os.path.basename(p))[0]
@@ -408,9 +420,9 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
     if not tab8:
         return
 
-    # Layouts auflösen
-    layout_g = resolve_layout_path(["Layout_Tab8_g.xlsx", "Tabelle-8-Layout_g.xlsx", TEMPLATES[8].get("ext","")])
-    layout_jj = resolve_layout_path(["Layout_Tab8_JJ_g.xlsx", "Tabelle-8-Layout_JJ_g.xlsx", TEMPLATES[8].get("ext_jj","")])
+    # Layouts auflösen (TEMPLATES[8] existiert in der stabilen Basis nicht -> niemals referenzieren)
+    layout_g = resolve_layout_path(["Layout_Tab8_g.xlsx", "Tabelle-8-Layout_g.xlsx"])
+    layout_jj = resolve_layout_path(["Layout_Tab8_JJ_g.xlsx", "Tabelle-8-Layout_JJ_g.xlsx"])
 
     if not layout_g:
         raise FileNotFoundError("Layout für Tabelle 8 (_g) fehlt. Erwartet z.B. Layout_Tab8_g.xlsx oder Tabelle-8-Layout_g.xlsx in ./Layouts")
@@ -453,6 +465,14 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         if len(ws_map) < 4 and len(wb_out.worksheets) >= 4:
             for idx, nr in enumerate([25,26,27,28]):
                 ws_map.setdefault(nr, wb_out.worksheets[idx])
+
+        # Absicherung: Layout muss 4 Blätter hergeben
+        still_missing = [nr for nr in [25, 26, 27, 28] if nr not in ws_map]
+        if still_missing:
+            raise ValueError(
+                "Layout für Tabelle 8 muss 4 Tabellenblätter enthalten (25..28). Fehlend: "
+                + ", ".join(map(str, still_missing))
+            )
 
         # Füllen + umbenennen
         for nr in [25,26,27,28]:
