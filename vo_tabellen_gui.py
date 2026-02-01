@@ -30,7 +30,7 @@ def clean_excel_string(s: str) -> str:
 
 
 
-__version__ = "2.2.6"
+__version__ = "2.3.0"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -1122,6 +1122,73 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         else:
             logger.log("[TAB9][WARN] Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
 
+
+        # ============================================================
+
+
+        # Prüfungen / Markierungen – Tabelle 9 (_g)
+
+
+        #   - Summenprüfung nur Blatt 1 (29_...)
+
+
+        #   - Fall-1-2-Markierung nur JJ, alle Blätter, Spalten E..M
+
+
+        # ============================================================
+
+
+        yellow_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
+
+
+
+        logger.section(f"Prüfe Summen Tabelle 9 _g ({token})")
+
+
+        try:
+
+
+            tab9_summenpruefung_blatt1(ws_map[29], kind, logger, yellow_fill)
+
+
+        except Exception as e:
+
+
+            logger.log(f"[TAB9][SUM][ERROR] Summenprüfung fehlgeschlagen: {e}")
+
+
+
+        if kind == "jj":
+
+
+            try:
+
+
+                for _nr in [29, 30, 31, 32]:
+
+
+                    _ws = ws_map[_nr]
+
+
+                    for _c in range(5, 14):  # E..M
+
+
+                        mark_cells_with_1_or_2(_ws, _c, yellow_fill)
+
+
+                logger.section(f"Fall-1-2-Prüfung Tabelle 9 _g ({token})")
+
+
+                logger.log("[TAB9][FALL12] JJ: Zellen mit 1/2 in E..M gelb markiert (alle Blätter).")
+
+
+            except Exception as e:
+
+
+                logger.log(f"[TAB9][FALL12][ERROR] Markierung fehlgeschlagen: {e}")
+
+
+
         out_path_g = os.path.join(out_dir, f"Tabelle-9-Land_{token}_g.xlsx")
         wb_g.save(out_path_g)
         logger.log(f"[TAB9] _g -> {out_path_g}")
@@ -1173,6 +1240,42 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                 tab8_normalize_stand(ws_out, target_row, max_col_i, stand, ref_cell=ref_cell_i)
         else:
             logger.log("[TAB9][WARN] (_INTERN) Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
+
+
+        # ============================================================
+
+
+        # Prüfungen – Tabelle 9 (_INTERN)
+
+
+        #   - Summenprüfung nur Blatt 1 (29_...)
+
+
+        #   - KEINE Fall-1-2-Markierung im _INTERN
+
+
+        # ============================================================
+
+
+        yellow_fill_i = PatternFill(fill_type="solid", fgColor="FFFF00")
+
+
+
+        logger.section(f"Prüfe Summen Tabelle 9 _INTERN ({token})")
+
+
+        try:
+
+
+            tab9_summenpruefung_blatt1(ws_map_i[29], kind, logger, yellow_fill_i, tag_suffix="INTERN")
+
+
+        except Exception as e:
+
+
+            logger.log(f"[TAB9][SUM][ERROR][INTERN] Summenprüfung fehlgeschlagen: {e}")
+
+
 
         out_path_i = os.path.join(out_dir, f"Tabelle-9-Land_{token}_INTERN.xlsx")
         wb_i.save(out_path_i)
@@ -1283,6 +1386,72 @@ def tab8_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: Patt
         ws.cell(row=target_row, column=c).fill = fill_changed
         logger.log(f"[TAB8][SUM]{tag}[KORR] Blatt 1: {col_letter(c)}22 war {t}, gesetzt auf {s} (Summe {col_letter(c)}15:{col_letter(c)}21).")
 
+
+
+
+def tab9_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: PatternFill, tag_suffix: str=""):
+    """Summenprüfung für Tabelle 9 auf Blatt 1.
+
+    Prüft:
+      - Spalte E: Summe Zeilen 13..19 == Zeile 20
+      - nur wenn E abweicht: zusätzlich Spalten F..M (Zeilen 13..19) gegen Zeile 20
+    Korrigiert Abweichungen in Zeile 20 und markiert die geänderten Zellen gelb.
+    """
+    sum_rows = range(13, 20)  # 13..19
+    target_row = 20
+    tag = f"[{tag_suffix}]" if tag_suffix else ""
+
+    cols = list(range(5, 14))  # E..M
+
+    def col_letter(c):
+        return openpyxl.utils.get_column_letter(c)
+
+    def calc_sum(col):
+        s = 0
+        any_val = False
+        for r in sum_rows:
+            v = _tab8_int_value(ws.cell(row=r, column=col).value)
+            if v is None:
+                continue
+            any_val = True
+            s += v
+        return (s, any_val)
+
+    def get_target(col):
+        return _tab8_int_value(ws.cell(row=target_row, column=col).value)
+
+    # A/B: Spalte E immer
+    e_sum, e_any = calc_sum(5)
+    e_target = get_target(5)
+
+    if not e_any and e_target is None:
+        logger.log(f"[TAB9][SUM]{tag} Blatt 1: Spalte E enthält keine summierbaren Werte (Zeilen 13..20).")
+        return
+
+    if e_target == e_sum:
+        logger.log(f"[TAB9][SUM]{tag}[OK] Blatt 1: E20 stimmt ({e_sum}).")
+        return
+
+    # Abweichung: E korrigieren + markieren
+    set_value_merge_safe(ws, target_row, 5, e_sum)
+    ws.cell(row=target_row, column=5).fill = fill_changed
+    logger.log(f"[TAB9][SUM]{tag}[KORR] Blatt 1: E20 war {e_target}, gesetzt auf {e_sum} (Summe E13:E19).")
+
+    # C: Nur wenn E abweicht, die restlichen Spalten prüfen/korrigieren
+    for c in cols:
+        if c == 5:
+            continue
+        s, any_val = calc_sum(c)
+        t = get_target(c)
+        if not any_val and t is None:
+            logger.log(f"[TAB9][SUM]{tag}[INFO] Blatt 1: {col_letter(c)} enthält keine summierbaren Werte (Zeilen 13..20).")
+            continue
+        if t == s:
+            logger.log(f"[TAB9][SUM]{tag}[OK] Blatt 1: {col_letter(c)}20 stimmt ({s}).")
+            continue
+        set_value_merge_safe(ws, target_row, c, s)
+        ws.cell(row=target_row, column=c).fill = fill_changed
+        logger.log(f"[TAB9][SUM]{tag}[KORR] Blatt 1: {col_letter(c)}20 war {t}, gesetzt auf {s} (Summe {col_letter(c)}13:{col_letter(c)}19).")
 
 def format_numeric_cells(ws, skip_cols=None):
     if skip_cols is None:
