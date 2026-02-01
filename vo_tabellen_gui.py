@@ -2190,7 +2190,7 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
 
 def start_gui():
     root = tk.Tk()
-    root.title("VÖ-Tabellen – GUI v2.2.4 (Tabelle 1/2/3/5/8/9)")
+    root.title("Inso-Tabellen – GUI Vers. 1.01 (Tabelle 1/2/3/5/8/9)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
