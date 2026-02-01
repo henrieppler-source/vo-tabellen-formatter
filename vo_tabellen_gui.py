@@ -19,7 +19,7 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -519,8 +519,10 @@ def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     except Exception:
         pass
 
-    # A1 muss leer sein
-    set_value_merge_safe(ws_out, 1, 1, None)
+    # A1: im _INTERN-Layout steht hier die rote INTERN-Überschrift – die darf nicht gelöscht werden.
+    a1 = ws_out.cell(row=1, column=1).value
+    if not (isinstance(a1, str) and a1.strip().upper() == INTERNAL_HEADER_TEXT):
+        set_value_merge_safe(ws_out, 1, 1, None)
 
     # Datenblock erkennen (raw) + (out)
     f_raw, l_raw, footer_raw = tab8_detect_data_block(ws_raw)
@@ -695,9 +697,9 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                 + ", ".join(map(str, still_missing))
             )
 
-        # Füllen + umbenennen
+        # Füllen + umbenennen + Footer aktualisieren
         stand_row = None  # Stand-Zeile aus Blatt 1 merken (falls Layout Stand nur dort hat)
-        for nr in [25,26,27,28]:
+        for nr in [25, 26, 27, 28]:
             ws_out = ws_map[nr]
             raw_path = parts[nr]
             base = os.path.splitext(os.path.basename(raw_path))[0]
@@ -705,23 +707,14 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                 ws_out.title = base  # z.B. 25_Tab8_2025-11
             except Exception:
                 pass
-            fill_tab8_sheet(ws_out, raw_path, max_col, logger)
 
-                    # Footer/Stand je Blatt aktualisieren (Copyright-Jahr + Stand, falls vorhanden)
-        for nr in [25,26,27,28]:
-            ws_out = ws_map[nr]
-            raw_path = parts[nr]
-            base = os.path.splitext(os.path.basename(raw_path))[0]
-            try:
-                ws_out.title = base  # z.B. 25_Tab8_2025-11
-            except Exception:
-                pass
+            # Daten füllen (Spaltenbegrenzung: _g M=13, JJ/N=14, _INTERN immer N=14)
             fill_tab8_sheet(ws_out, raw_path, max_col, logger)
 
             # Copyright-Jahr + Stand in vorhandenen Stand-Zellen aktualisieren
             tab8_update_footer(ws_out, stand)
 
-        # Stand normalisieren: exakt 1x pro Blatt und immer in der letzten Spalte (M bzw. N).
+# Stand normalisieren: exakt 1x pro Blatt und immer in der letzten Spalte (M bzw. N).
         ref_ws = ws_map[25]
         stand_cells = tab8_scan_stand_cells(ref_ws)
         if stand_cells:
