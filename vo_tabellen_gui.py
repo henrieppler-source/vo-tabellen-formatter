@@ -30,7 +30,7 @@ def clean_excel_string(s: str) -> str:
 
 
 
-__version__ = "2.3.1"
+__version__ = "2.3.2"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -1987,8 +1987,15 @@ def _copy_sheet(ws_src, ws_dst):
         pass
 
     # Cells: copy value + style
+    # IMPORTANT: In openpyxl, cells that are part of a merged range (except the
+    # top-left anchor cell) are represented by MergedCell objects. Those do not
+    # have attributes like .col_idx and must not be written to directly.
+    from openpyxl.cell.cell import MergedCell
+
     for row in ws_src.iter_rows():
         for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
             if cell.value is None and not cell.has_style:
                 continue
             c = ws_dst.cell(row=cell.row, column=cell.col_idx, value=cell.value)
