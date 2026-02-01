@@ -88,21 +88,16 @@ class Logger:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def blank(self):
+        # echte Leerzeile im Protokoll (ohne Zeitstempel)
+        print("")
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write("\n")
 
-def blank(self):
-    # echte Leerzeile im Protokoll (ohne Zeitstempel)
-    print("")
-    with open(self.path, "a", encoding="utf-8") as f:
-        f.write("\n")
-
-def section(self, title: str):
-    self.blank()
-    self.log(f"*** {title} ***")
-
-
-# ============================================================
-# Excel Helper
-# ============================================================
+    def section(self, title: str):
+        # Abschnittsüberschrift mit Leerzeile davor
+        self.blank()
+        self.log(f"*** {title} ***")
 
 def is_numeric_like(v):
     if v is None:
@@ -256,7 +251,7 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
 # ============================================================
 
 TAB8_FILE_RE = re.compile(r"^(?P<nr>25|26|27|28)_Tab8_(?P<token>.+)\.xlsx$", re.IGNORECASE)
-TAB9_FILE_RE = re.compile(r"^(?P<nr>25|26|27|28)_Tab9_(?P<token>.+)\.xlsx$", re.IGNORECASE)
+TAB9_FILE_RE = re.compile(r"^(?P<nr>29|30|31|32)_Tab9_(?P<token>.+)\.xlsx$", re.IGNORECASE)
 
 def resolve_layout_path(candidates):
     """Nimmt die erste existierende Layout-Datei aus candidates (relativ zu LAYOUT_DIR)."""
@@ -684,7 +679,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
 
 
 def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var: tk.StringVar):
-    """Findet 25..28_Tab9_*.xlsx und erzeugt _g-Dateien.
+    """Findet 29..32_Tab9_*.xlsx und erzeugt _g-Dateien.
 
     WICHTIG: Bei euch liegen Tab9/Tab9 oft in einem Unterordner 'Tab-8-9'.
     Daher wird sowohl im input_dir als auch in input_dir/Tab-8-9 gesucht.
@@ -1556,7 +1551,7 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
 
 
 
-# Tabelle 9 (_g/_INTERN): 25..28_Tab9_*.xlsx als Batch (4 Blätter in 1 Datei)
+# Tabelle 9 (_g/_INTERN): 29..32_Tab9_*.xlsx als Batch (4 Blätter in 1 Datei)
 try:
     logger.section("Erstelle Tabelle 9 (_g/_INTERN)")
     process_tab9_in_dir(input_dir, out_dir, logger, status_var)
@@ -1602,7 +1597,7 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
 
 def start_gui():
     root = tk.Tk()
-    root.title("VÖ-Tabellen – GUI v2.0.9 (Tabelle 1/2/3/5/8)")
+    root.title("VÖ-Tabellen – GUI v2.2.2 (Tabelle 1/2/3/5/8/9)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
