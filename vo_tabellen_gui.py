@@ -19,7 +19,7 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.1.2"
+__version__ = "2.2.0"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -87,6 +87,17 @@ class Logger:
         print(line)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+
+def blank(self):
+    # echte Leerzeile im Protokoll (ohne Zeitstempel)
+    print("")
+    with open(self.path, "a", encoding="utf-8") as f:
+        f.write("\n")
+
+def section(self, title: str):
+    self.blank()
+    self.log(f"*** {title} ***")
 
 
 # ============================================================
@@ -245,6 +256,7 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
 # ============================================================
 
 TAB8_FILE_RE = re.compile(r"^(?P<nr>25|26|27|28)_Tab8_(?P<token>.+)\.xlsx$", re.IGNORECASE)
+TAB9_FILE_RE = re.compile(r"^(?P<nr>25|26|27|28)_Tab9_(?P<token>.+)\.xlsx$", re.IGNORECASE)
 
 def resolve_layout_path(candidates):
     """Nimmt die erste existierende Layout-Datei aus candidates (relativ zu LAYOUT_DIR)."""
@@ -309,6 +321,16 @@ def tab8_find_title_cell(ws_raw):
     for r in range(1, 25):
         v = ws_raw.cell(row=r, column=1).value
         if isinstance(v, str) and v.strip().startswith("8.") and "Unternehmensinsolvenzen" in v:
+            return v
+    # Fallback: A3
+    v = ws_raw.cell(row=3, column=1).value
+    return v if isinstance(v, str) else None
+
+def tab9_find_title_cell(ws_raw):
+    """Sucht eine Titelzelle (typisch A3) und gibt den Text zurück."""
+    for r in range(1, 25):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip().startswith("9.") and "Unternehmensinsolvenzen" in v:
             return v
     # Fallback: A3
     v = ws_raw.cell(row=3, column=1).value
@@ -495,6 +517,15 @@ def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     else:
         ws_raw = wb_raw[wb_raw.sheetnames[0]]
 
+def fill_tab9_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
+    """Füllt ein Layout-Blatt mit den Daten aus raw_path (Spaltenbegrenzung: M=13 oder N=14)."""
+    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
+    # Sheetwahl: bevorzugt XML-Tab8-Land, sonst erstes Blatt
+    if 8 in RAW_SHEET_NAMES and RAW_SHEET_NAMES[8] in wb_raw.sheetnames:
+        ws_raw = wb_raw[RAW_SHEET_NAMES[8]]
+    else:
+        ws_raw = wb_raw[wb_raw.sheetnames[0]]
+
     title = tab8_find_title_cell(ws_raw)
     if title:
         set_value_merge_safe(ws_out, 3, 1, title)
@@ -652,6 +683,53 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         logger.log("[TAB8][WARN] INTERN-Layout fehlt (Layout_Tab8_INTERN.xlsx). _INTERN-Dateien werden übersprungen, bis das Layout vorhanden ist.")
 
 
+def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var: tk.StringVar):
+    """Findet 25..28_Tab9_*.xlsx und erzeugt _g-Dateien.
+
+    WICHTIG: Bei euch liegen Tab9/Tab9 oft in einem Unterordner 'Tab-8-9'.
+    Daher wird sowohl im input_dir als auch in input_dir/Tab-8-9 gesucht.
+    """
+
+    search_dirs = [input_dir]
+    sub = os.path.join(input_dir, "Tab-8-9")
+    if os.path.isdir(sub):
+        search_dirs.append(sub)
+
+    candidates = []
+    for d in search_dirs:
+        candidates.extend(glob.glob(os.path.join(d, "*_Tab9_*.xlsx")))
+    tab8 = {}
+    for p in candidates:
+        base = os.path.splitext(os.path.basename(p))[0]
+        m = TAB9_FILE_RE.match(os.path.basename(p))
+        if not m:
+            continue
+        nr = int(m.group("nr"))
+        token = m.group("token")
+        kind, norm_token = parse_tab8_token(token)
+        if kind is None:
+            logger.log(f"[TAB9][SKIP] Unbekannter Zeitraum-Token in {os.path.basename(p)}")
+            continue
+        key = (kind, norm_token)
+        tab8.setdefault(key, {})[nr] = p
+
+    if not tab8:
+        return
+
+    # Layouts auflösen (TEMPLATES[8] existiert in der stabilen Basis nicht -> niemals referenzieren)
+    layout_g = resolve_layout_path(["Layout_Tab9_g.xlsx", "Tabelle-8-Layout_g.xlsx"])
+    layout_jj = resolve_layout_path(["Layout_Tab9_JJ_g.xlsx", "Tabelle-8-Layout_JJ_g.xlsx"])
+
+    layout_intern = resolve_layout_path(["Layout_Tab9_INTERN.xlsx", "Tabelle-8-Layout_INTERN.xlsx"])
+
+    if not layout_g:
+        raise FileNotFoundError("Layout für Tabelle 9 (_g) fehlt. Erwartet z.B. Layout_Tab9_g.xlsx oder Tabelle-8-Layout_g.xlsx in ./Layouts")
+    if not layout_jj:
+        logger.log("[TAB9][WARN] JJ-Layout fehlt (Layout_Tab9_JJ_g.xlsx). JJ nutzt Layout _g als Fallback.")
+    if not layout_intern:
+        logger.log("[TAB9][WARN] INTERN-Layout fehlt (Layout_Tab9_INTERN.xlsx). _INTERN-Dateien werden übersprungen, bis das Layout vorhanden ist.")
+
+
     for (kind, token), parts in sorted(tab8.items()):
         needed = [25,26,27,28]
         missing = [n for n in needed if n not in parts]
@@ -745,6 +823,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         yellow_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
 
         try:
+            logger.section("Prüfe Summen Tabelle 8 _g")
             tab8_summenpruefung_blatt1(ws_map[25], kind, logger, yellow_fill)
         except Exception as e:
             logger.log(f"[TAB8][SUM][ERROR] Summenprüfung fehlgeschlagen: {e}")
@@ -755,6 +834,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                     _ws = ws_map[_nr]
                     for _c in range(5, 14):  # E..M
                         mark_cells_with_1_or_2(_ws, _c, yellow_fill)
+                logger.section("Fall-1-2-Prüfung Tabelle 8 _g")
                 logger.log("[TAB8][FALL12] JJ: Zellen mit 1/2 in E..M gelb markiert (alle Blätter).")
             except Exception as e:
                 logger.log(f"[TAB8][FALL12][ERROR] Markierung fehlgeschlagen: {e}")
@@ -825,6 +905,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
 
             # Prüfungen – Summenprüfung Blatt 1, Variante A: bei Abweichung E dann F..N
             try:
+                logger.section("Prüfe Summen Tabelle 8 _INTERN")
                 tab8_summenpruefung_blatt1(ws_map_int[25], kind, logger, yellow_fill, include_n_always=True, tag_suffix="INTERN")
             except Exception as e:
                 logger.log(f"[TAB8][SUM][ERROR][INTERN] Summenprüfung fehlgeschlagen: {e}")
@@ -1454,22 +1535,34 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
         logger.log(f"[START] {fname}")
 
         if table_no == 1:
+            logger.section("Erstelle Tabelle 1")
             process_table1_file(f, out_dir, logger)
         elif table_no in (2, 3):
             process_table2_or_3_file(table_no, f, out_dir, logger)
         elif table_no == 5:
+            logger.section("Erstelle Tabelle 5")
             process_table5_file(f, out_dir, logger)
 
         logger.log(f"[OK]    {fname}")
 
     # Tabelle 8 (_g): 25..28_Tab8_*.xlsx als Batch (4 Blätter in 1 Datei)
     try:
+        logger.section("Erstelle Tabelle 8 (_g/_INTERN)")
         process_tab8_in_dir(input_dir, out_dir, logger, status_var)
     except Exception as e:
         logger.log(f"[TAB8][FEHLER] {e}")
         raise
 
 
+
+
+# Tabelle 9 (_g/_INTERN): 25..28_Tab9_*.xlsx als Batch (4 Blätter in 1 Datei)
+try:
+    logger.section("Erstelle Tabelle 9 (_g/_INTERN)")
+    process_tab9_in_dir(input_dir, out_dir, logger, status_var)
+except Exception as e:
+    logger.log(f"[TAB9][FEHLER] {e}")
+    raise
 
 def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir, logger: Logger, status_var: tk.StringVar):
     if not base_out_dir:
