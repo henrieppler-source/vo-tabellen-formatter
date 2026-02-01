@@ -1944,6 +1944,13 @@ def _safe_sheet_title(base: str, used: set) -> str:
     return t
 
 def _copy_sheet(ws_src, ws_dst):
+    """Kopiert ein Arbeitsblatt inkl. Layout möglichst Excel-identisch.
+
+    Wichtig: Excel speichert Rahmenlinien/Formatierungen auch in Zellen ohne Wert,
+    oft innerhalb von Merge-Bereichen. Deshalb kopieren wir Styles für ALLE Zellen
+    innerhalb der Dimension (nicht nur Nicht-merged Anchor-Zellen) und übernehmen
+    Merge-Ranges separat.
+    """
     # Column dimensions (width etc.)
     for col_letter, dim in ws_src.column_dimensions.items():
         dst_dim = ws_dst.column_dimensions[col_letter]
@@ -1976,41 +1983,65 @@ def _copy_sheet(ws_src, ws_dst):
     except Exception:
         pass
 
-    # Merged cells
-    for rng in ws_src.merged_cells.ranges:
-        ws_dst.merge_cells(str(rng))
-
     # Freeze panes
     try:
         ws_dst.freeze_panes = ws_src.freeze_panes
     except Exception:
         pass
 
-    # Cells: copy value + style
-    # IMPORTANT: In openpyxl, cells that are part of a merged range (except the
-    # top-left anchor cell) are represented by MergedCell objects. Those do not
-    # have attributes like .col_idx and must not be written to directly.
-    from openpyxl.cell.cell import MergedCell
+    # Build merged-cell map (coord -> anchor coord)
+    merged_map = {}
+    for rng in ws_src.merged_cells.ranges:
+        min_row, min_col, max_row, max_col = rng.min_row, rng.min_col, rng.max_row, rng.max_col
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                merged_map[(r, c)] = (min_row, min_col)
 
-    for row in ws_src.iter_rows():
-        for cell in row:
-            if isinstance(cell, MergedCell):
-                continue
-            if cell.value is None and not cell.has_style:
-                continue
-            c = ws_dst.cell(row=cell.row, column=cell.col_idx, value=cell.value)
-            if cell.has_style:
-                c._style = copy_style(cell._style)
-                c.number_format = cell.number_format
-                c.protection = copy_style(cell.protection)
-                c.alignment = copy_style(cell.alignment)
-                c.fill = copy_style(cell.fill)
-                c.font = copy_style(cell.font)
-                c.border = copy_style(cell.border)
-            if cell.hyperlink:
-                c._hyperlink = copy_style(cell.hyperlink)
-            if cell.comment:
-                c.comment = copy_style(cell.comment)
+    # Apply merged ranges to target
+    for rng in ws_src.merged_cells.ranges:
+        ws_dst.merge_cells(str(rng))
+
+    # Cells: copy value + style for all cells in the sheet dimension
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.utils.cell import range_boundaries
+
+    try:
+        dim = ws_src.calculate_dimension()  # e.g. "A1:K67"
+        min_col, min_row, max_col, max_row = range_boundaries(dim)
+    except Exception:
+        # Fallback: use max_row/max_column (may miss pure-style cells, but better than crash)
+        min_row, min_col, max_row, max_col = 1, 1, ws_src.max_row or 1, ws_src.max_column or 1
+
+    for r in range(min_row, max_row + 1):
+        for c_idx in range(min_col, max_col + 1):
+            src = ws_src.cell(row=r, column=c_idx)
+            dst = ws_dst.cell(row=r, column=c_idx)
+
+            # Value: only write into merge anchor; others must stay empty
+            if isinstance(src, MergedCell):
+                anchor = merged_map.get((r, c_idx))
+                if anchor == (r, c_idx):
+                    dst.value = src.value
+                else:
+                    dst.value = None
+            else:
+                dst.value = src.value
+
+            # Style: copy even for merged cells (borders in headers!)
+            if src.has_style:
+                dst._style = copy_style(src._style)
+                dst.number_format = src.number_format
+                dst.protection = copy_style(src.protection)
+                dst.alignment = copy_style(src.alignment)
+                dst.fill = copy_style(src.fill)
+                dst.font = copy_style(src.font)
+                dst.border = copy_style(src.border)
+
+            # Hyperlinks/comments only make sense on non-merged or anchor cells
+            if getattr(src, "hyperlink", None):
+                dst._hyperlink = copy_style(src.hyperlink)
+            if getattr(src, "comment", None):
+                dst.comment = copy_style(src.comment)
 
 def create_collection_workbooks(out_dir: str, logger: Logger, status_var: tk.StringVar):
     """Erzeugt Sammeltabellen je Zeitraum und Variante (g/INTERN) aus den bereits erzeugten Einzeldateien."""
@@ -2190,7 +2221,7 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
 
 def start_gui():
     root = tk.Tk()
-    root.title("Inso-Tabellen – GUI Vers. 1.01 (Tabelle 1/2/3/5/8/9)")
+    root.title("Inso-Tabellen – GUI Version 1.02 (Tabelle 1/2/3/5/8/9)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
