@@ -30,7 +30,7 @@ def clean_excel_string(s: str) -> str:
 
 
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -1913,6 +1913,151 @@ def ensure_output_run_folder(base_out_dir: str, input_folder: str) -> str:
     return run_dir
 
 
+
+# ============================================================
+# Sammeltabellen (pro Zeitraum und Variante)
+# ============================================================
+
+COLLECTION_TABLES = [1, 2, 3, 5, 8, 9]
+
+TABLEFILE_RE = re.compile(r"^Tabelle-(?P<no>\d+)-Land_(?P<token>.+)_(?P<variant>g|INTERN)\.xlsx$", re.IGNORECASE)
+
+def _safe_sheet_title(base: str, used: set) -> str:
+    # Excel erlaubt max. 31 Zeichen; außerdem dürfen : \ / ? * [ ] nicht vorkommen.
+    t = re.sub(r"[:\\/\?\*\[\]]", "_", base)
+    t = t.strip()
+    if not t:
+        t = "Sheet"
+    t = t[:31]
+    if t not in used:
+        used.add(t)
+        return t
+    # Kollision -> suffix
+    for i in range(1, 999):
+        suffix = f"_{i}"
+        tt = (t[:31 - len(suffix)] + suffix)[:31]
+        if tt not in used:
+            used.add(tt)
+            return tt
+    # worst case
+    used.add(t)
+    return t
+
+def _copy_sheet(ws_src, ws_dst):
+    # Column dimensions (width etc.)
+    for col_letter, dim in ws_src.column_dimensions.items():
+        dst_dim = ws_dst.column_dimensions[col_letter]
+        dst_dim.width = dim.width
+        dst_dim.hidden = dim.hidden
+        dst_dim.outlineLevel = dim.outlineLevel
+        dst_dim.collapsed = dim.collapsed
+
+    # Row dimensions (height etc.)
+    for row_idx, dim in ws_src.row_dimensions.items():
+        dst_dim = ws_dst.row_dimensions[row_idx]
+        dst_dim.height = dim.height
+        dst_dim.hidden = dim.hidden
+        dst_dim.outlineLevel = dim.outlineLevel
+        dst_dim.collapsed = dim.collapsed
+
+    # Sheet properties & page setup (best effort)
+    try:
+        ws_dst.sheet_format = copy_style(ws_src.sheet_format)
+    except Exception:
+        pass
+    try:
+        ws_dst.sheet_properties = copy_style(ws_src.sheet_properties)
+    except Exception:
+        pass
+    try:
+        ws_dst.page_setup = copy_style(ws_src.page_setup)
+        ws_dst.page_margins = copy_style(ws_src.page_margins)
+        ws_dst.print_options = copy_style(ws_src.print_options)
+    except Exception:
+        pass
+
+    # Merged cells
+    for rng in ws_src.merged_cells.ranges:
+        ws_dst.merge_cells(str(rng))
+
+    # Freeze panes
+    try:
+        ws_dst.freeze_panes = ws_src.freeze_panes
+    except Exception:
+        pass
+
+    # Cells: copy value + style
+    for row in ws_src.iter_rows():
+        for cell in row:
+            if cell.value is None and not cell.has_style:
+                continue
+            c = ws_dst.cell(row=cell.row, column=cell.col_idx, value=cell.value)
+            if cell.has_style:
+                c._style = copy_style(cell._style)
+                c.number_format = cell.number_format
+                c.protection = copy_style(cell.protection)
+                c.alignment = copy_style(cell.alignment)
+                c.fill = copy_style(cell.fill)
+                c.font = copy_style(cell.font)
+                c.border = copy_style(cell.border)
+            if cell.hyperlink:
+                c._hyperlink = copy_style(cell.hyperlink)
+            if cell.comment:
+                c.comment = copy_style(cell.comment)
+
+def create_collection_workbooks(out_dir: str, logger: Logger, status_var: tk.StringVar):
+    """Erzeugt Sammeltabellen je Zeitraum und Variante (g/INTERN) aus den bereits erzeugten Einzeldateien."""
+    files = [os.path.basename(p) for p in glob.glob(os.path.join(out_dir, "Tabelle-*-Land_*_*.xlsx"))]
+    found = {}
+    for fn in files:
+        m = TABLEFILE_RE.match(fn)
+        if not m:
+            continue
+        no = int(m.group("no"))
+        token = m.group("token")
+        var = m.group("variant").upper()  # G/INTERN; wir nutzen unten g/INTERN
+        if var == "G":
+            var = "g"
+        found.setdefault((token, var), {})[no] = os.path.join(out_dir, fn)
+
+    if not found:
+        return
+
+    for (token, var), mp in sorted(found.items(), key=lambda x: (x[0][0], x[0][1])):
+        missing = [n for n in COLLECTION_TABLES if n not in mp]
+        if missing:
+            logger.section(f"Sammeltabelle ({token}) {var}: übersprungen")
+            logger.log(f"[SAMMEL][SKIP] Zeitraum {token} {var}: es fehlen Tabellen: {', '.join(map(str, missing))}")
+            continue
+
+        status_var.set(f"Sammeltabelle ({token}) {var}")
+        logger.section(f"Erstelle Sammeltabelle {var} ({token})")
+        out_name = f"Inso_Land09_{token}_Tabellen_gesamt_{var}.xlsx"
+        out_path = os.path.join(out_dir, out_name)
+
+        wb_out = openpyxl.Workbook()
+        # default sheet entfernen
+        try:
+            wb_out.remove(wb_out.active)
+        except Exception:
+            pass
+
+        used_titles = set()
+        for no in COLLECTION_TABLES:
+            src_path = mp[no]
+            wb_src = openpyxl.load_workbook(src_path)
+            for ws_src in wb_src.worksheets:
+                # Blattname: Prefix + Original
+                base_title = f"T{no}_{ws_src.title}"
+                title = _safe_sheet_title(base_title, used_titles)
+                ws_dst = wb_out.create_sheet(title)
+                _copy_sheet(ws_src, ws_dst)
+
+        wb_out.save(out_path)
+        logger.log(f"[SAMMEL] {var} -> {out_path}")
+
+
+
 # ============================================================
 # GUI
 # ============================================================
@@ -1989,6 +2134,14 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
     except Exception as e:
         logger.log(f"[TAB9][FEHLER] {e}")
         raise
+
+    # Sammeltabellen je Zeitraum (_g/_INTERN) aus Tabellen 1/2/3/5/8/9
+    try:
+        create_collection_workbooks(out_dir, logger, status_var)
+    except Exception as e:
+        logger.log(f"[SAMMEL][FEHLER] {e}")
+        raise
+
 
 
 
