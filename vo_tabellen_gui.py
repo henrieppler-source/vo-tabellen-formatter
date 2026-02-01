@@ -19,7 +19,7 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.0.9"
+__version__ = "2.1.0"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -738,6 +738,30 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         else:
             logger.log("[TAB8][WARN] Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
 
+
+        # ============================================================
+        # Prüfungen / Markierungen – Tabelle 8 (_g)
+        #   - Summenprüfung nur Blatt 1 (25_...)
+        #   - Fall-1-2-Markierung nur JJ, alle Blätter, Spalten E..M
+        # ============================================================
+        yellow_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
+
+        try:
+            tab8_summenpruefung_blatt1(ws_map[25], kind, logger, yellow_fill)
+        except Exception as e:
+            logger.log(f"[TAB8][SUM][ERROR] Summenprüfung fehlgeschlagen: {e}")
+
+        if kind == "jj":
+            try:
+                for _nr in [25, 26, 27, 28]:
+                    _ws = ws_map[_nr]
+                    for _c in range(5, 14):  # E..M
+                        mark_cells_with_1_or_2(_ws, _c, yellow_fill)
+                logger.log("[TAB8][FALL12] JJ: Zellen mit 1/2 in E..M gelb markiert (alle Blätter).")
+            except Exception as e:
+                logger.log(f"[TAB8][FALL12][ERROR] Markierung fehlgeschlagen: {e}")
+
+
         out_path = os.path.join(out_dir, out_name)
         wb_out.save(out_path)
         logger.log(f"[TAB8] _g -> {out_path}")
@@ -752,6 +776,101 @@ def mark_cells_with_1_or_2(ws, col_index, fill):
             cell.fill = fill
         elif isinstance(v, str) and v.strip() in ("1", "2"):
             cell.fill = fill
+
+
+def _tab8_int_value(v):
+    """Konvertiert Zellwert zu int, wenn möglich. '-', 'X', None -> None."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            return int(round(v))
+        except Exception:
+            return None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s or s in ("-", "X"):
+            return None
+        # Tausenderpunkt / Leerzeichen entfernen
+        s2 = s.replace(".", "").replace(" ", "").replace("\u00a0", "")
+        # Dezimalkomma ignorieren (sollte bei Fallzahlen nicht vorkommen)
+        s2 = s2.split(",")[0]
+        if s2.lstrip("-").isdigit():
+            try:
+                return int(s2)
+            except Exception:
+                return None
+    return None
+
+
+def tab8_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: PatternFill):
+    """Summenprüfung für Tabelle 8 (_g) auf Blatt 1.
+
+    Prüft:
+      - Spalte E: Summe Zeilen 15..21 == Zeile 22
+      - nur wenn E abweicht: zusätzlich Spalten F..M (und bei JJ zusätzlich N)
+    Korrigiert Abweichungen in Zeile 22 und markiert die geänderten Zellen gelb.
+    """
+    sum_rows = range(15, 22)  # 15..21
+    target_row = 22
+
+    # Spalten: E..M (5..13), bei JJ zusätzlich N (14)
+    cols = list(range(5, 14))
+    if kind == "jj":
+        cols.append(14)
+
+    def col_letter(c):
+        return openpyxl.utils.get_column_letter(c)
+
+    def calc_sum(col):
+        s = 0
+        any_val = False
+        for r in sum_rows:
+            v = _tab8_int_value(ws.cell(row=r, column=col).value)
+            if v is None:
+                continue
+            any_val = True
+            s += v
+        return (s, any_val)
+
+    def get_target(col):
+        return _tab8_int_value(ws.cell(row=target_row, column=col).value)
+
+    # A/B: Spalte E immer
+    e_sum, e_any = calc_sum(5)
+    e_target = get_target(5)
+
+    # Wenn keine Werte gefunden wurden, trotzdem protokollieren (Layout / Daten prüfen)
+    if not e_any and e_target is None:
+        logger.log("[TAB8][SUM] Blatt 1: Spalte E enthält keine summierbaren Werte (Zeilen 15..22).")
+        return
+
+    if e_target == e_sum:
+        logger.log(f"[TAB8][SUM][OK] Blatt 1: E22 stimmt ({e_sum}).")
+        return
+
+    # Abweichung: E korrigieren + markieren
+    set_value_merge_safe(ws, target_row, 5, e_sum)
+    ws.cell(row=target_row, column=5).fill = fill_changed
+    logger.log(f"[TAB8][SUM][KORR] Blatt 1: E22 war {e_target}, gesetzt auf {e_sum} (Summe E15:E21).")
+
+    # C: Nur wenn E abweicht, die restlichen Spalten prüfen/korrigieren
+    for c in cols:
+        if c == 5:
+            continue
+        s, any_val = calc_sum(c)
+        t = get_target(c)
+        if not any_val and t is None:
+            logger.log(f"[TAB8][SUM][INFO] Blatt 1: {col_letter(c)} enthält keine summierbaren Werte (Zeilen 15..22).")
+            continue
+        if t == s:
+            logger.log(f"[TAB8][SUM][OK] Blatt 1: {col_letter(c)}22 stimmt ({s}).")
+            continue
+        set_value_merge_safe(ws, target_row, c, s)
+        ws.cell(row=target_row, column=c).fill = fill_changed
+        logger.log(f"[TAB8][SUM][KORR] Blatt 1: {col_letter(c)}22 war {t}, gesetzt auf {s} (Summe {col_letter(c)}15:{col_letter(c)}21).")
 
 
 def format_numeric_cells(ws, skip_cols=None):
