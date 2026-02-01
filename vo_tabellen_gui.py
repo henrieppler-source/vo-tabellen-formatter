@@ -21,55 +21,16 @@ INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
 
 def clean_excel_string(s: str) -> str:
-    """
-    Entfernt Zeichen, die in XML 1.0 (und damit in XLSX) unzulässig sind und Excel beim Öffnen
-    zu Reparaturen zwingen können.
-
-    Erlaubt bleiben u.a. Tab (\t), LF (\n) und CR (\r). Zusätzlich werden Surrogate entfernt.
+    """Entfernt Steuerzeichen (<0x20), die Excel beim Öffnen zu Reparaturen zwingen können.
+    Erlaubt bleiben Tab (\t), LF (\n) und CR (\r).
     """
     if s is None:
         return s
-    s = str(s)
-
-    out = []
-    for ch in s:
-        o = ord(ch)
-        # XML 1.0 erlaubte Zeichen:
-        # 0x9, 0xA, 0xD, 0x20-0xD7FF, 0xE000-0xFFFD, 0x10000-0x10FFFF
-        if o in (0x9, 0xA, 0xD) or (0x20 <= o <= 0xD7FF) or (0xE000 <= o <= 0xFFFD) or (0x10000 <= o <= 0x10FFFF):
-            # Surrogates ausschließen (D800-DFFF)
-            if 0xD800 <= o <= 0xDFFF:
-                continue
-            out.append(ch)
-        # sonst: verwerfen
-    return "".join(out)
+    return "".join(ch for ch in s if ch in ("\t", "\n", "\r") or ord(ch) >= 32)
 
 
-def merged_anchor(ws, row: int, col: int):
-    """
-    Wenn (row,col) in einem Merge-Bereich liegt, gib die linke obere Ankerzelle zurück.
-    Excel reagiert empfindlich, wenn man Werte in Nicht-Ankerzellen von Merge-Ranges schreibt.
-    """
-    try:
-        for rng in ws.merged_cells.ranges:
-            if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
-                return rng.min_row, rng.min_col
-    except Exception:
-        pass
-    return row, col
 
-
-def set_plain_text(ws, row: int, col: int, text: str):
-    """Setzt Text als 'plain string' (sanitized) und schreibt nur in Merge-Ankerzellen."""
-    r, c = merged_anchor(ws, row, col)
-    cell = ws.cell(row=r, column=c)
-    cell.value = None
-    cell.value = clean_excel_string(text)
-    cell.data_type = "s"
-    return cell
-
-
-__version__ = "2.2.7"
+__version__ = "2.2.6"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -266,7 +227,7 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
         v = ws.cell(row=r, column=1).value
         if isinstance(v, str) and "(C)opyright" in v:
             new_text = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
-            set_plain_text(ws, r, 1, new_text)
+            ws.cell(row=r, column=1).value = new_text
             copyright_row = r
             break
 
@@ -277,7 +238,7 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
         for c in range(1, max_col + 1):
             v = ws.cell(row=r, column=c).value
             if isinstance(v, str) and v.strip().startswith("Stand:") and r != copyright_row:
-                set_plain_text(ws, r, c, "")
+                ws.cell(row=r, column=c).value = ""
 
     if not stand_text:
         return
@@ -292,7 +253,8 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
         stand_col = get_last_data_col(ws, end_row=copyright_row - 1)
 
     cop_cell = ws.cell(row=copyright_row, column=1)
-    tgt = set_plain_text(ws, copyright_row, stand_col, stand_text)
+    tgt = ws.cell(row=copyright_row, column=stand_col)
+    tgt.value = stand_text
 
     tgt.font = copy_style(cop_cell.font)
     tgt.border = copy_style(cop_cell.border)
@@ -524,25 +486,28 @@ def tab8_update_footer(ws_out, stand_ddmmyyyy: str):
     """
     current_year = datetime.now().year
 
-    # Copyright-Zelle suchen (irgendwo im Blatt) und Jahr ersetzen (sanitized, Merge-sicher)
+    # Copyright-Zelle suchen (irgendwo im Blatt) und Jahr ersetzen
     found_copyright = False
     for r in range(ws_out.max_row, 0, -1):
         for c in range(1, ws_out.max_column + 1):
             v = ws_out.cell(row=r, column=c).value
             if isinstance(v, str) and "(C)opyright" in v:
-                new_text = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
-                set_plain_text(ws_out, r, c, new_text)
+                ws_out.cell(row=r, column=c).value = re.sub(
+                    r"\(C\)opyright\s+\d{4}",
+                    f"(C)opyright {current_year}",
+                    v
+                )
                 found_copyright = True
                 break
         if found_copyright:
             break
 
-    # Stand-Zelle suchen und Datum setzen (sanitized, Merge-sicher)
+    # Stand-Zelle suchen und Datum setzen
     for r in range(ws_out.max_row, 0, -1):
         for c in range(ws_out.max_column, 0, -1):
             v = ws_out.cell(row=r, column=c).value
             if isinstance(v, str) and "Stand:" in v:
-                set_plain_text(ws_out, r, c, f"Stand: {stand_ddmmyyyy}")
+                ws_out.cell(row=r, column=c).value = f"Stand: {stand_ddmmyyyy}"
                 return (r, c)
 
     return None
@@ -839,7 +804,7 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             max_col_int = 14  # bis N in allen Zeiträumen
             out_name_int = f"Tabelle-8-Land_{token}_INTERN.xlsx"
 
-            wb_int = openpyxl.load_workbook(layout_intern, rich_text=True)
+            wb_int = openpyxl.load_workbook(layout_intern)
 
             ws_map_int = {}
             for ws in wb_int.worksheets:
@@ -1110,7 +1075,7 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         else:
             layout_path_g = layout_g
 
-        wb_g = openpyxl.load_workbook(layout_path_g, rich_text=True)
+        wb_g = openpyxl.load_workbook(layout_path_g)
         ws_map = {}
         for ws in wb_g.worksheets:
             m2 = re.match(r"^(29|30|31|32)_Tab9_", ws.title)
@@ -1164,7 +1129,7 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         # --- _INTERN ---
         logger.section(f"Erstelle Tabelle 9 _INTERN ({token})")
         logger.log(f"[TAB9] Zeitraum {token} ({kind}) – baue _INTERN")
-        wb_i = openpyxl.load_workbook(layout_intern, rich_text=True)
+        wb_i = openpyxl.load_workbook(layout_intern)
         ws_map_i = {}
         for ws in wb_i.worksheets:
             m2 = re.match(r"^(29|30|31|32)_Tab9_", ws.title)
