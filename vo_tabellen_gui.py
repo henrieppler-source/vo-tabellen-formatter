@@ -19,7 +19,7 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.2.0"
+__version__ = "2.2.4"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -52,6 +52,7 @@ RAW_SHEET_NAMES = {
     3: "XML-Tab3-Land",
     5: "XML-Tab5-Land",
     8: "XML-Tab8-Land",
+    9: "XML-Tab9-Land",
 }
 
 TEMPLATES = {
@@ -89,15 +90,21 @@ class Logger:
             f.write(line + "\n")
 
     def blank(self):
-        # echte Leerzeile im Protokoll (ohne Zeitstempel)
+        """Schreibt eine echte Leerzeile ins Protokoll (ohne Zeitstempel)."""
         print("")
         with open(self.path, "a", encoding="utf-8") as f:
             f.write("\n")
 
     def section(self, title: str):
-        # Abschnittsüberschrift mit Leerzeile davor
+        """Zwischenüberschrift zur besseren Orientierung im Protokoll."""
         self.blank()
         self.log(f"*** {title} ***")
+
+
+
+# ============================================================
+# Excel Helper
+# ============================================================
 
 def is_numeric_like(v):
     if v is None:
@@ -251,7 +258,6 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
 # ============================================================
 
 TAB8_FILE_RE = re.compile(r"^(?P<nr>25|26|27|28)_Tab8_(?P<token>.+)\.xlsx$", re.IGNORECASE)
-TAB9_FILE_RE = re.compile(r"^(?P<nr>29|30|31|32)_Tab9_(?P<token>.+)\.xlsx$", re.IGNORECASE)
 
 def resolve_layout_path(candidates):
     """Nimmt die erste existierende Layout-Datei aus candidates (relativ zu LAYOUT_DIR)."""
@@ -316,16 +322,6 @@ def tab8_find_title_cell(ws_raw):
     for r in range(1, 25):
         v = ws_raw.cell(row=r, column=1).value
         if isinstance(v, str) and v.strip().startswith("8.") and "Unternehmensinsolvenzen" in v:
-            return v
-    # Fallback: A3
-    v = ws_raw.cell(row=3, column=1).value
-    return v if isinstance(v, str) else None
-
-def tab9_find_title_cell(ws_raw):
-    """Sucht eine Titelzelle (typisch A3) und gibt den Text zurück."""
-    for r in range(1, 25):
-        v = ws_raw.cell(row=r, column=1).value
-        if isinstance(v, str) and v.strip().startswith("9.") and "Unternehmensinsolvenzen" in v:
             return v
     # Fallback: A3
     v = ws_raw.cell(row=3, column=1).value
@@ -512,15 +508,6 @@ def fill_tab8_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
     else:
         ws_raw = wb_raw[wb_raw.sheetnames[0]]
 
-def fill_tab9_sheet(ws_out, raw_path, max_data_col: int, logger: Logger):
-    """Füllt ein Layout-Blatt mit den Daten aus raw_path (Spaltenbegrenzung: M=13 oder N=14)."""
-    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
-    # Sheetwahl: bevorzugt XML-Tab8-Land, sonst erstes Blatt
-    if 8 in RAW_SHEET_NAMES and RAW_SHEET_NAMES[8] in wb_raw.sheetnames:
-        ws_raw = wb_raw[RAW_SHEET_NAMES[8]]
-    else:
-        ws_raw = wb_raw[wb_raw.sheetnames[0]]
-
     title = tab8_find_title_cell(ws_raw)
     if title:
         set_value_merge_safe(ws_out, 3, 1, title)
@@ -678,53 +665,6 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         logger.log("[TAB8][WARN] INTERN-Layout fehlt (Layout_Tab8_INTERN.xlsx). _INTERN-Dateien werden übersprungen, bis das Layout vorhanden ist.")
 
 
-def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var: tk.StringVar):
-    """Findet 29..32_Tab9_*.xlsx und erzeugt _g-Dateien.
-
-    WICHTIG: Bei euch liegen Tab9/Tab9 oft in einem Unterordner 'Tab-8-9'.
-    Daher wird sowohl im input_dir als auch in input_dir/Tab-8-9 gesucht.
-    """
-
-    search_dirs = [input_dir]
-    sub = os.path.join(input_dir, "Tab-8-9")
-    if os.path.isdir(sub):
-        search_dirs.append(sub)
-
-    candidates = []
-    for d in search_dirs:
-        candidates.extend(glob.glob(os.path.join(d, "*_Tab9_*.xlsx")))
-    tab8 = {}
-    for p in candidates:
-        base = os.path.splitext(os.path.basename(p))[0]
-        m = TAB9_FILE_RE.match(os.path.basename(p))
-        if not m:
-            continue
-        nr = int(m.group("nr"))
-        token = m.group("token")
-        kind, norm_token = parse_tab8_token(token)
-        if kind is None:
-            logger.log(f"[TAB9][SKIP] Unbekannter Zeitraum-Token in {os.path.basename(p)}")
-            continue
-        key = (kind, norm_token)
-        tab8.setdefault(key, {})[nr] = p
-
-    if not tab8:
-        return
-
-    # Layouts auflösen (TEMPLATES[8] existiert in der stabilen Basis nicht -> niemals referenzieren)
-    layout_g = resolve_layout_path(["Layout_Tab9_g.xlsx", "Tabelle-8-Layout_g.xlsx"])
-    layout_jj = resolve_layout_path(["Layout_Tab9_JJ_g.xlsx", "Tabelle-8-Layout_JJ_g.xlsx"])
-
-    layout_intern = resolve_layout_path(["Layout_Tab9_INTERN.xlsx", "Tabelle-8-Layout_INTERN.xlsx"])
-
-    if not layout_g:
-        raise FileNotFoundError("Layout für Tabelle 9 (_g) fehlt. Erwartet z.B. Layout_Tab9_g.xlsx oder Tabelle-8-Layout_g.xlsx in ./Layouts")
-    if not layout_jj:
-        logger.log("[TAB9][WARN] JJ-Layout fehlt (Layout_Tab9_JJ_g.xlsx). JJ nutzt Layout _g als Fallback.")
-    if not layout_intern:
-        logger.log("[TAB9][WARN] INTERN-Layout fehlt (Layout_Tab9_INTERN.xlsx). _INTERN-Dateien werden übersprungen, bis das Layout vorhanden ist.")
-
-
     for (kind, token), parts in sorted(tab8.items()):
         needed = [25,26,27,28]
         missing = [n for n in needed if n not in parts]
@@ -733,6 +673,7 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             continue
 
         status_var.set(f"Tabelle 8 ({token})")
+        logger.section(f"Erstelle Tabelle 8 _g ({token})")
         logger.log(f"[TAB8] Zeitraum {token} ({kind}) – baue _g")
 
         stand = get_file_stand_date([parts[n] for n in needed])
@@ -817,8 +758,8 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         # ============================================================
         yellow_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
 
+        logger.section(f"Prüfe Summen Tabelle 8 _g ({token})")
         try:
-            logger.section("Prüfe Summen Tabelle 8 _g")
             tab8_summenpruefung_blatt1(ws_map[25], kind, logger, yellow_fill)
         except Exception as e:
             logger.log(f"[TAB8][SUM][ERROR] Summenprüfung fehlgeschlagen: {e}")
@@ -829,7 +770,7 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                     _ws = ws_map[_nr]
                     for _c in range(5, 14):  # E..M
                         mark_cells_with_1_or_2(_ws, _c, yellow_fill)
-                logger.section("Fall-1-2-Prüfung Tabelle 8 _g")
+                logger.section(f"Fall-1-2-Prüfung Tabelle 8 _g ({token})")
                 logger.log("[TAB8][FALL12] JJ: Zellen mit 1/2 in E..M gelb markiert (alle Blätter).")
             except Exception as e:
                 logger.log(f"[TAB8][FALL12][ERROR] Markierung fehlgeschlagen: {e}")
@@ -845,6 +786,7 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         # KEINE Fall-1-2-Markierung im _INTERN.
         # ============================================================
         if layout_intern:
+            logger.section(f"Erstelle Tabelle 8 _INTERN ({token})")
             logger.log(f"[TAB8] Zeitraum {token} ({kind}) – baue _INTERN")
             max_col_int = 14  # bis N in allen Zeiträumen
             out_name_int = f"Tabelle-8-Land_{token}_INTERN.xlsx"
@@ -899,8 +841,8 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
                 logger.log("[TAB8][WARN] (_INTERN) Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
 
             # Prüfungen – Summenprüfung Blatt 1, Variante A: bei Abweichung E dann F..N
+            logger.section(f"Prüfe Summen Tabelle 8 _INTERN ({token})")
             try:
-                logger.section("Prüfe Summen Tabelle 8 _INTERN")
                 tab8_summenpruefung_blatt1(ws_map_int[25], kind, logger, yellow_fill, include_n_always=True, tag_suffix="INTERN")
             except Exception as e:
                 logger.log(f"[TAB8][SUM][ERROR][INTERN] Summenprüfung fehlgeschlagen: {e}")
@@ -911,6 +853,317 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
 
 
 
+
+
+# ============================================================
+# Tabelle 9 (_g / _INTERN) – Batch-Verarbeitung 29..32_Tab9_*
+#   - _g und _INTERN nahezu identisch
+#   - _INTERN enthält zusätzlich die rote Überschrift in Zeile 1 (aus Layout);
+#     falls im Layout nicht vorhanden, wird sie gesetzt.
+# ============================================================
+
+TAB9_FILE_RE = re.compile(r"^(?P<nr>29|30|31|32)_Tab9_(?P<token>.+)\.xlsx$", re.IGNORECASE)
+
+def tab9_parse_token(token: str):
+    """Token-Parser analog Tab8 (Monat/Quartal/Halbjahr/JJ)."""
+    return parse_tab8_token(token)
+
+def tab9_find_title_cell(ws_raw):
+    """Sucht eine Titelzelle (typisch A3) und gibt den Text zurück."""
+    for r in range(1, 25):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip().startswith("9.") and "Unternehmensinsolvenzen" in v:
+            return v
+    v = ws_raw.cell(row=3, column=1).value
+    return v if isinstance(v, str) else None
+
+def tab9_detect_data_block(ws_raw):
+    """Ermittelt Datenblock wie Tab8, aber mit Marker 29..32 in A1 möglich."""
+    # Footer-Trenner suchen
+    footer = None
+    for r in range(ws_raw.max_row, 0, -1):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
+            footer = r
+            break
+    if footer is None:
+        footer = ws_raw.max_row + 1
+
+    header_row = None
+    for r in range(1, min(ws_raw.max_row, 80) + 1):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, str):
+            s = v.replace("\n", " ").strip().lower()
+            if "schl" in s and "nr" in s:
+                header_row = r
+                break
+
+    first = None
+    start_scan = (header_row + 1) if header_row else 1
+    for r in range(start_scan, min(footer, ws_raw.max_row + 1)):
+        v = ws_raw.cell(row=r, column=1).value
+        if isinstance(v, (int, float)):
+            if header_row is None and r <= 3 and int(v) in (29, 30, 31, 32):
+                continue
+            first = r
+            break
+        if isinstance(v, str) and v.strip().isdigit():
+            iv = int(v.strip())
+            if header_row is None and r <= 3 and iv in (29, 30, 31, 32):
+                continue
+            first = r
+            break
+
+    if first is None:
+        first = (header_row + 1) if header_row else 1
+
+    last = max(first, footer - 1)
+    return first, last, footer
+
+def tab9_find_footnote_start(ws_out):
+    for r in range(1, ws_out.max_row + 1):
+        v = ws_out.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip().startswith("-"):
+            return r
+    return None
+
+def fill_tab9_sheet(ws_out, raw_path, max_data_col: int, is_intern: bool, logger: Logger):
+    """Füllt ein Layout-Blatt mit den Daten aus raw_path."""
+    wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
+    if 9 in RAW_SHEET_NAMES and RAW_SHEET_NAMES[9] in wb_raw.sheetnames:
+        ws_raw = wb_raw[RAW_SHEET_NAMES[9]]
+    else:
+        ws_raw = wb_raw[wb_raw.sheetnames[0]]
+
+    title = tab9_find_title_cell(ws_raw)
+    if title:
+        set_value_merge_safe(ws_out, 3, 1, title)
+
+    # INTERN-Überschrift: im Layout stehen lassen; falls fehlt, setzen.
+    if is_intern:
+        a1 = ws_out.cell(row=1, column=1).value
+        if not (isinstance(a1, str) and a1.strip().upper() == INTERNAL_HEADER_TEXT):
+            set_value_merge_safe(ws_out, 1, 1, INTERNAL_HEADER_TEXT)
+    else:
+        # _g: A1 leer lassen (aber nur, wenn dort nicht versehentlich die INTERN-Überschrift steht)
+        a1 = ws_out.cell(row=1, column=1).value
+        if isinstance(a1, str) and a1.strip().upper() == INTERNAL_HEADER_TEXT:
+            set_value_merge_safe(ws_out, 1, 1, None)
+
+    # Datenblock raw/out bestimmen
+    f_raw, l_raw, _footer_raw = tab9_detect_data_block(ws_raw)
+
+    # Ziel-Start: erste numerische Schl.-Nr. im Layout (Spalte A)
+    f_out = None
+    for r in range(1, ws_out.max_row + 1):
+        v = ws_out.cell(row=r, column=1).value
+        if isinstance(v, (int, float)) or (isinstance(v, str) and str(v).strip().isdigit()):
+            f_out = r
+            break
+    if f_out is None:
+        f_out = f_raw
+
+    # Datenende im Layout begrenzen (Fußnoten/Copyright/Trenner)
+    data_end_out = None
+    footnote_start = tab9_find_footnote_start(ws_out)
+    if footnote_start:
+        data_end_out = footnote_start
+
+    copyright_row = tab8_find_copyright_row(ws_out)
+    if copyright_row:
+        data_end_out = min(data_end_out, copyright_row) if data_end_out else copyright_row
+
+    sep_row = None
+    for r in range(ws_out.max_row, 0, -1):
+        v = ws_out.cell(row=r, column=1).value
+        if isinstance(v, str) and v.strip() and all(ch in "—-_" for ch in v.strip()):
+            sep_row = r
+            break
+    if sep_row:
+        data_end_out = min(data_end_out, sep_row) if data_end_out else sep_row
+
+    if data_end_out is None:
+        data_end_out = ws_out.max_row + 1
+    if data_end_out <= f_out:
+        data_end_out = ws_out.max_row + 1
+
+    is_sec = get_merged_secondary_checker(ws_out)
+
+    # Datenbereich leeren
+    for rr in range(f_out, data_end_out):
+        for cc in range(1, max_data_col + 1):
+            if not is_sec(rr, cc):
+                set_value_merge_safe(ws_out, rr, cc, None)
+
+    # Kopieren
+    raw_r = f_raw
+    out_r = f_out
+    while raw_r <= l_raw and out_r < data_end_out:
+        for cc in range(1, max_data_col + 1):
+            if is_sec(out_r, cc):
+                continue
+            set_value_merge_safe(ws_out, out_r, cc, ws_raw.cell(row=raw_r, column=cc).value)
+        raw_r += 1
+        out_r += 1
+
+def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var: tk.StringVar):
+    """Findet 29..32_Tab9_*.xlsx und erzeugt _g und _INTERN."""
+    search_dirs = [input_dir]
+    sub = os.path.join(input_dir, "Tab-8-9")
+    if os.path.isdir(sub):
+        search_dirs.append(sub)
+
+    candidates = []
+    for d in search_dirs:
+        candidates.extend(glob.glob(os.path.join(d, "*_Tab9_*.xlsx")))
+
+    tab9 = {}
+    for p in candidates:
+        m = TAB9_FILE_RE.match(os.path.basename(p))
+        if not m:
+            continue
+        nr = int(m.group("nr"))
+        token = m.group("token")
+        kind, norm_token = tab9_parse_token(token)
+        if kind is None:
+            logger.log(f"[TAB9][SKIP] Unbekannter Zeitraum-Token in {os.path.basename(p)}")
+            continue
+        key = (kind, norm_token)
+        tab9.setdefault(key, {})[nr] = p
+
+    if not tab9:
+        return
+
+    layout_g = resolve_layout_path(["Layout_Tab9_g.xlsx", "Tabelle-9-Layout_g.xlsx"])
+    layout_intern = resolve_layout_path(["Layout_Tab9_INTERN.xlsx", "Tabelle-9-Layout_INTERN.xlsx"])
+    layout_jj = resolve_layout_path(["Layout_Tab9_JJ_g.xlsx", "Tabelle-9-Layout_JJ_g.xlsx"])
+
+    if not layout_g:
+        raise FileNotFoundError("Layout für Tabelle 9 (_g) fehlt. Erwartet z.B. Layout_Tab9_g.xlsx in ./Layouts")
+    if not layout_intern:
+        raise FileNotFoundError("Layout für Tabelle 9 (_INTERN) fehlt. Erwartet z.B. Layout_Tab9_INTERN.xlsx in ./Layouts")
+
+    for (kind, token), parts in sorted(tab9.items()):
+        needed = [29, 30, 31, 32]
+        missing = [n for n in needed if n not in parts]
+        if missing:
+            logger.log(f"[TAB9][SKIP] Zeitraum {token}: es fehlen Dateien: {', '.join(map(str, missing))}")
+            continue
+
+        stand = get_file_stand_date([parts[n] for n in needed])
+
+        # --- _g ---
+        status_var.set(f"Tabelle 9 ({token})")
+        logger.section(f"Erstelle Tabelle 9 _g ({token})")
+        logger.log(f"[TAB9] Zeitraum {token} ({kind}) – baue _g")
+
+        if kind == "jj" and layout_jj:
+            layout_path_g = layout_jj
+        else:
+            layout_path_g = layout_g
+
+        wb_g = openpyxl.load_workbook(layout_path_g, rich_text=True)
+        ws_map = {}
+        for ws in wb_g.worksheets:
+            m2 = re.match(r"^(29|30|31|32)_Tab9_", ws.title)
+            if m2:
+                ws_map[int(m2.group(1))] = ws
+        if len(ws_map) < 4 and len(wb_g.worksheets) >= 4:
+            for idx, nr in enumerate(needed):
+                ws_map.setdefault(nr, wb_g.worksheets[idx])
+
+        still_missing = [nr for nr in needed if nr not in ws_map]
+        if still_missing:
+            raise ValueError("Layout für Tabelle 9 (_g) muss 4 Tabellenblätter enthalten (29..32). Fehlend: " + ", ".join(map(str, still_missing)))
+
+        # max_col: aus Layout ableiten (bis letzte Datenspalte vor Stand). Wir nehmen konservativ max 20.
+        max_col_g = min(20, max(ws.max_column for ws in ws_map.values()))
+
+        for nr in needed:
+            ws_out = ws_map[nr]
+            raw_path = parts[nr]
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            try:
+                ws_out.title = base
+            except Exception:
+                pass
+
+            fill_tab9_sheet(ws_out, raw_path, max_col_g, is_intern=False, logger=logger)
+            tab8_update_footer(ws_out, stand)
+
+        # Stand normalisieren wie Tab8: Blatt 1 normalisieren, Blätter 2..4 in Copyright-Zeile ziehen
+        ref_ws = ws_map[29]
+        stand_cells = tab8_scan_stand_cells(ref_ws)
+        if stand_cells:
+            src_r, src_c = max(stand_cells, key=lambda x: (x[0], x[1]))
+            src_cell = ref_ws.cell(row=src_r, column=src_c)
+
+            keep_r, keep_c = tab8_normalize_stand(ref_ws, src_r, max_col_g, stand, ref_cell=src_cell)
+            ref_cell = ref_ws.cell(row=keep_r, column=keep_c)
+
+            for nr in [30, 31, 32]:
+                ws_out = ws_map[nr]
+                cr = tab8_find_copyright_row(ws_out)
+                target_row = cr if cr is not None else src_r
+                tab8_normalize_stand(ws_out, target_row, max_col_g, stand, ref_cell=ref_cell)
+        else:
+            logger.log("[TAB9][WARN] Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
+
+        out_path_g = os.path.join(out_dir, f"Tabelle-9-Land_{token}_g.xlsx")
+        wb_g.save(out_path_g)
+        logger.log(f"[TAB9] _g -> {out_path_g}")
+
+        # --- _INTERN ---
+        logger.section(f"Erstelle Tabelle 9 _INTERN ({token})")
+        logger.log(f"[TAB9] Zeitraum {token} ({kind}) – baue _INTERN")
+        wb_i = openpyxl.load_workbook(layout_intern, rich_text=True)
+        ws_map_i = {}
+        for ws in wb_i.worksheets:
+            m2 = re.match(r"^(29|30|31|32)_Tab9_", ws.title)
+            if m2:
+                ws_map_i[int(m2.group(1))] = ws
+        if len(ws_map_i) < 4 and len(wb_i.worksheets) >= 4:
+            for idx, nr in enumerate(needed):
+                ws_map_i.setdefault(nr, wb_i.worksheets[idx])
+
+        still_missing_i = [nr for nr in needed if nr not in ws_map_i]
+        if still_missing_i:
+            raise ValueError("Layout für Tabelle 9 (_INTERN) muss 4 Tabellenblätter enthalten (29..32). Fehlend: " + ", ".join(map(str, still_missing_i)))
+
+        max_col_i = min(20, max(ws.max_column for ws in ws_map_i.values()))
+
+        for nr in needed:
+            ws_out = ws_map_i[nr]
+            raw_path = parts[nr]
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            try:
+                ws_out.title = base
+            except Exception:
+                pass
+
+            fill_tab9_sheet(ws_out, raw_path, max_col_i, is_intern=True, logger=logger)
+            tab8_update_footer(ws_out, stand)
+
+        ref_ws_i = ws_map_i[29]
+        stand_cells_i = tab8_scan_stand_cells(ref_ws_i)
+        if stand_cells_i:
+            src_r_i, src_c_i = max(stand_cells_i, key=lambda x: (x[0], x[1]))
+            src_cell_i = ref_ws_i.cell(row=src_r_i, column=src_c_i)
+
+            keep_r_i, keep_c_i = tab8_normalize_stand(ref_ws_i, src_r_i, max_col_i, stand, ref_cell=src_cell_i)
+            ref_cell_i = ref_ws_i.cell(row=keep_r_i, column=keep_c_i)
+
+            for nr in [30, 31, 32]:
+                ws_out = ws_map_i[nr]
+                cr = tab8_find_copyright_row(ws_out)
+                target_row = cr if cr is not None else src_r_i
+                tab8_normalize_stand(ws_out, target_row, max_col_i, stand, ref_cell=ref_cell_i)
+        else:
+            logger.log("[TAB9][WARN] (_INTERN) Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
+
+        out_path_i = os.path.join(out_dir, f"Tabelle-9-Land_{token}_INTERN.xlsx")
+        wb_i.save(out_path_i)
+        logger.log(f"[TAB9] _INTERN -> {out_path_i}")
 def mark_cells_with_1_or_2(ws, col_index, fill):
     for r in range(1, ws.max_row + 1):
         cell = ws.cell(row=r, column=col_index)
@@ -1500,6 +1753,7 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
 
     files = find_raw_files(input_dir)
     has_tab8 = bool(glob.glob(os.path.join(input_dir, "*_Tab8_*.xlsx")))
+    has_tab9 = bool(glob.glob(os.path.join(input_dir, "*_Tab9_*.xlsx")))
     if not files and not (has_tab8 or has_tab9):
         logger.log(f"[INFO] Keine passenden Rohdateien gefunden in: {input_dir}")
         return
@@ -1527,34 +1781,33 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
             continue
 
         status_var.set(f"Verarbeite {os.path.basename(input_dir)}: {fname}")
+        logger.section(f"Erstelle Tabelle {table_no} ({fname})")
         logger.log(f"[START] {fname}")
 
         if table_no == 1:
-            logger.section("Erstelle Tabelle 1")
             process_table1_file(f, out_dir, logger)
         elif table_no in (2, 3):
             process_table2_or_3_file(table_no, f, out_dir, logger)
         elif table_no == 5:
-            logger.section("Erstelle Tabelle 5")
             process_table5_file(f, out_dir, logger)
 
         logger.log(f"[OK]    {fname}")
 
     # Tabelle 8 (_g): 25..28_Tab8_*.xlsx als Batch (4 Blätter in 1 Datei)
     try:
-        logger.section("Erstelle Tabelle 8 (_g/_INTERN)")
         process_tab8_in_dir(input_dir, out_dir, logger, status_var)
     except Exception as e:
         logger.log(f"[TAB8][FEHLER] {e}")
         raise
 
+
     # Tabelle 9 (_g/_INTERN): 29..32_Tab9_*.xlsx als Batch (4 Blätter in 1 Datei)
     try:
-        logger.section("Erstelle Tabelle 9 (_g/_INTERN)")
         process_tab9_in_dir(input_dir, out_dir, logger, status_var)
     except Exception as e:
         logger.log(f"[TAB9][FEHLER] {e}")
         raise
+
 
 
 def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir, logger: Logger, status_var: tk.StringVar):
@@ -1595,7 +1848,7 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
 
 def start_gui():
     root = tk.Tk()
-    root.title("VÖ-Tabellen – GUI v2.2.2 (Tabelle 1/2/3/5/8/9)")
+    root.title("VÖ-Tabellen – GUI v2.2.4 (Tabelle 1/2/3/5/8/9)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
