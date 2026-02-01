@@ -21,18 +21,16 @@ INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
 
 def clean_excel_string(s: str) -> str:
-    """Entfernt Steuerzeichen, die Excel beim Öffnen zu Reparaturen zwingen können."""
+    """Entfernt Steuerzeichen (<0x20), die Excel beim Öffnen zu Reparaturen zwingen können.
+    Erlaubt bleiben Tab (\t), LF (\n) und CR (\r).
+    """
     if s is None:
         return s
-    # Erlaubt: Tab (	), LF (
-), CR (
-). Alles andere < 0x20 raus.
-    return "".join(ch for ch in s if ch in ("	", "
-", "
-") or ord(ch) >= 32)
+    return "".join(ch for ch in s if ch in ("\t", "\n", "\r") or ord(ch) >= 32)
 
 
-__version__ = "2.2.5"
+
+__version__ = "2.2.6"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -1927,4 +1925,3 @@ def start_gui():
 
 if __name__ == "__main__":
     start_gui()
-
