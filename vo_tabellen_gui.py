@@ -19,7 +19,20 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.2.4"
+
+def clean_excel_string(s: str) -> str:
+    """Entfernt Steuerzeichen, die Excel beim Öffnen zu Reparaturen zwingen können."""
+    if s is None:
+        return s
+    # Erlaubt: Tab (	), LF (
+), CR (
+). Alles andere < 0x20 raus.
+    return "".join(ch for ch in s if ch in ("	", "
+", "
+") or ord(ch) >= 32)
+
+
+__version__ = "2.2.5"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -43,6 +56,8 @@ def set_value_merge_safe(ws, row, col, value):
         if tl is None:
             return False
         row, col = tl
+    if isinstance(value, str):
+        value = clean_excel_string(value)
     ws.cell(row=row, column=col).value = value
     return True
 
@@ -1076,8 +1091,8 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         if still_missing:
             raise ValueError("Layout für Tabelle 9 (_g) muss 4 Tabellenblätter enthalten (29..32). Fehlend: " + ", ".join(map(str, still_missing)))
 
-        # max_col: aus Layout ableiten (bis letzte Datenspalte vor Stand). Wir nehmen konservativ max 20.
-        max_col_g = min(20, max(ws.max_column for ws in ws_map.values()))
+        # max_col: Tabelle 9 hat Daten nur bis Spalte M (13). Für Stand/Footer nutzen wir ebenfalls M.
+        max_col_g = 13
 
         for nr in needed:
             ws_out = ws_map[nr]
@@ -1130,7 +1145,7 @@ def process_tab9_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         if still_missing_i:
             raise ValueError("Layout für Tabelle 9 (_INTERN) muss 4 Tabellenblätter enthalten (29..32). Fehlend: " + ", ".join(map(str, still_missing_i)))
 
-        max_col_i = min(20, max(ws.max_column for ws in ws_map_i.values()))
+        max_col_i = 13
 
         for nr in needed:
             ws_out = ws_map_i[nr]
@@ -1912,3 +1927,4 @@ def start_gui():
 
 if __name__ == "__main__":
     start_gui()
+
