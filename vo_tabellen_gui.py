@@ -1997,11 +1997,8 @@ def _copy_sheet(ws_src, ws_dst):
             for c in range(min_col, max_col + 1):
                 merged_map[(r, c)] = (min_row, min_col)
 
-    # Apply merged ranges to target
-    for rng in ws_src.merged_cells.ranges:
-        ws_dst.merge_cells(str(rng))
-
-    # Cells: copy value + style for all cells in the sheet dimension
+    # Apply merged ranges to target AFTER copying cells (so we can set styles/values on all cells)
+# Cells: copy value + style for all cells in the sheet dimension
     from openpyxl.cell.cell import MergedCell
     from openpyxl.utils.cell import range_boundaries
 
@@ -2036,12 +2033,19 @@ def _copy_sheet(ws_src, ws_dst):
                 dst.fill = copy_style(src.fill)
                 dst.font = copy_style(src.font)
                 dst.border = copy_style(src.border)
+            # Hyperlinks/comments only make sense on non-merged or on the merge anchor cell
+            anchor = merged_map.get((r, c_idx))
+            is_anchor = (anchor is None) or (anchor == (r, c_idx))
+            if is_anchor:
+                if getattr(src, "hyperlink", None):
+                    dst._hyperlink = copy_style(src.hyperlink)
+                if getattr(src, "comment", None):
+                    dst.comment = copy_style(src.comment)
 
-            # Hyperlinks/comments only make sense on non-merged or anchor cells
-            if getattr(src, "hyperlink", None):
-                dst._hyperlink = copy_style(src.hyperlink)
-            if getattr(src, "comment", None):
-                dst.comment = copy_style(src.comment)
+    # Apply merged ranges to target at the end (keeps individual cell styles intact)
+    for rng in ws_src.merged_cells.ranges:
+        ws_dst.merge_cells(str(rng))
+
 
 def create_collection_workbooks(out_dir: str, logger: Logger, status_var: tk.StringVar):
     """Erzeugt Sammeltabellen je Zeitraum und Variante (g/INTERN) aus den bereits erzeugten Einzeldateien."""
@@ -2221,7 +2225,7 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
 
 def start_gui():
     root = tk.Tk()
-    root.title("Inso-Tabellen – GUI Version 1.02 (Tabelle 1/2/3/5/8/9)")
+    root.title("Inso-Tabellen – GUI Vers. 1.03 (Tabelle 1/2/3/5/8/9)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
