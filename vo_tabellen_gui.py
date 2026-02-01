@@ -19,7 +19,7 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.0.8"
+__version__ = "2.0.9"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -403,6 +403,21 @@ def tab8_scan_stand_cells(ws):
     return coords
 
 
+
+def tab8_find_copyright_row(ws):
+    """Findet die Zeile der '(C)opyright'-Zelle (unterstes Vorkommen).
+
+    Rückgabe: row oder None
+    """
+    for r in range(ws.max_row, 0, -1):
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, str) and "(C)opyright" in v:
+                tl = _merged_top_left(ws, r, c)
+                rr, cc = tl if tl is not None else (r, c)
+                return rr
+    return None
+
 def tab8_normalize_stand(ws, stand_row: int, stand_col: int, stand_ddmmyyyy: str, ref_cell=None):
     """Sorgt dafür, dass 'Stand:' exakt einmal im Blatt vorkommt.
 
@@ -714,10 +729,12 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
             keep_r, keep_c = tab8_normalize_stand(ref_ws, stand_row, max_col, stand, ref_cell=src_cell)
             ref_cell = ref_ws.cell(row=keep_r, column=keep_c)
 
-            # Blätter 2..4: alle Stand-Dopplungen entfernen, Stand an gleicher Stelle setzen
-            for nr in [26,27,28]:
+            # Blätter 2..4: Stand in die Copyright-Zeile ziehen (eine Zeile, kein Doppelstand)
+            for nr in [26, 27, 28]:
                 ws_out = ws_map[nr]
-                tab8_normalize_stand(ws_out, stand_row, max_col, stand, ref_cell=ref_cell)
+                cr = tab8_find_copyright_row(ws_out)
+                target_row = cr if cr is not None else stand_row
+                tab8_normalize_stand(ws_out, target_row, max_col, stand, ref_cell=ref_cell)
         else:
             logger.log("[TAB8][WARN] Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
 
@@ -1304,7 +1321,7 @@ def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir,
 
 def start_gui():
     root = tk.Tk()
-    root.title("VÖ-Tabellen – GUI v2.0.8 (Tabelle 1/2/3/5/8)")
+    root.title("VÖ-Tabellen – GUI v2.0.9 (Tabelle 1/2/3/5/8)")
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(row=0, column=0, sticky="nsew")
