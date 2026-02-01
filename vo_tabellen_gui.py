@@ -19,7 +19,7 @@ PROTOKOLL_DIR = ""  # optional; wird in der GUI gewählt (leer = .\Protokolle ne
 LAYOUT_DIR = "Layouts"
 INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 # ============================================================
 # Hilfsfunktionen: Merge-sicher schreiben
@@ -640,10 +640,15 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
     layout_g = resolve_layout_path(["Layout_Tab8_g.xlsx", "Tabelle-8-Layout_g.xlsx"])
     layout_jj = resolve_layout_path(["Layout_Tab8_JJ_g.xlsx", "Tabelle-8-Layout_JJ_g.xlsx"])
 
+    layout_intern = resolve_layout_path(["Layout_Tab8_INTERN.xlsx", "Tabelle-8-Layout_INTERN.xlsx"])
+
     if not layout_g:
         raise FileNotFoundError("Layout für Tabelle 8 (_g) fehlt. Erwartet z.B. Layout_Tab8_g.xlsx oder Tabelle-8-Layout_g.xlsx in ./Layouts")
     if not layout_jj:
         logger.log("[TAB8][WARN] JJ-Layout fehlt (Layout_Tab8_JJ_g.xlsx). JJ-Dateien werden übersprungen, bis das Layout vorhanden ist.")
+    if not layout_intern:
+        logger.log("[TAB8][WARN] INTERN-Layout fehlt (Layout_Tab8_INTERN.xlsx). _INTERN-Dateien werden übersprungen, bis das Layout vorhanden ist.")
+
 
     for (kind, token), parts in sorted(tab8.items()):
         needed = [25,26,27,28]
@@ -766,6 +771,75 @@ def process_tab8_in_dir(input_dir: str, out_dir: str, logger: Logger, status_var
         wb_out.save(out_path)
         logger.log(f"[TAB8] _g -> {out_path}")
 
+        # ============================================================
+        # Tabelle 8 (_INTERN) – entspricht _g, aber Spalte N wird in allen Zeiträumen ausgewiesen.
+        # Summenprüfung Variante A auf Blatt 1 (E immer; wenn E abweicht dann F..N).
+        # KEINE Fall-1-2-Markierung im _INTERN.
+        # ============================================================
+        if layout_intern:
+            logger.log(f"[TAB8] Zeitraum {token} ({kind}) – baue _INTERN")
+            max_col_int = 14  # bis N in allen Zeiträumen
+            out_name_int = f"Tabelle-8-Land_{token}_INTERN.xlsx"
+
+            wb_int = openpyxl.load_workbook(layout_intern, rich_text=True)
+
+            ws_map_int = {}
+            for ws in wb_int.worksheets:
+                m2 = re.match(r"^(25|26|27|28)_Tab8_", ws.title)
+                if m2:
+                    ws_map_int[int(m2.group(1))] = ws
+            if len(ws_map_int) < 4 and len(wb_int.worksheets) >= 4:
+                for idx, nr in enumerate([25, 26, 27, 28]):
+                    ws_map_int.setdefault(nr, wb_int.worksheets[idx])
+
+            still_missing_int = [nr for nr in [25, 26, 27, 28] if nr not in ws_map_int]
+            if still_missing_int:
+                raise ValueError(
+                    "Layout für Tabelle 8 (_INTERN) muss 4 Tabellenblätter enthalten (25..28). Fehlend: "
+                    + ", ".join(map(str, still_missing_int))
+                )
+
+            # Füllen + Footer/Stand
+            for nr in [25, 26, 27, 28]:
+                ws_out = ws_map_int[nr]
+                raw_path = parts[nr]
+                base = os.path.splitext(os.path.basename(raw_path))[0]
+                try:
+                    ws_out.title = base
+                except Exception:
+                    pass
+
+                fill_tab8_sheet(ws_out, raw_path, max_col_int, logger)
+                tab8_update_footer(ws_out, stand)
+
+            # Stand normalisieren (wie bei _g): Blatt 1 normalisieren, Blätter 2..4 in Copyright-Zeile ziehen
+            ref_ws_int = ws_map_int[25]
+            stand_cells_int = tab8_scan_stand_cells(ref_ws_int)
+            if stand_cells_int:
+                src_r_int, src_c_int = max(stand_cells_int, key=lambda x: (x[0], x[1]))
+                src_cell_int = ref_ws_int.cell(row=src_r_int, column=src_c_int)
+
+                keep_r_int, keep_c_int = tab8_normalize_stand(ref_ws_int, src_r_int, max_col_int, stand, ref_cell=src_cell_int)
+                ref_cell_int = ref_ws_int.cell(row=keep_r_int, column=keep_c_int)
+
+                for nr in [26, 27, 28]:
+                    ws_out = ws_map_int[nr]
+                    cr = tab8_find_copyright_row(ws_out)
+                    target_row = cr if cr is not None else src_r_int
+                    tab8_normalize_stand(ws_out, target_row, max_col_int, stand, ref_cell=ref_cell_int)
+            else:
+                logger.log("[TAB8][WARN] (_INTERN) Keine 'Stand:'-Zelle im Layout gefunden – Stand wird nicht normalisiert. (Bitte Layout prüfen)")
+
+            # Prüfungen – Summenprüfung Blatt 1, Variante A: bei Abweichung E dann F..N
+            try:
+                tab8_summenpruefung_blatt1(ws_map_int[25], kind, logger, yellow_fill, include_n_always=True, tag_suffix="INTERN")
+            except Exception as e:
+                logger.log(f"[TAB8][SUM][ERROR][INTERN] Summenprüfung fehlgeschlagen: {e}")
+
+            out_path_int = os.path.join(out_dir, out_name_int)
+            wb_int.save(out_path_int)
+            logger.log(f"[TAB8] _INTERN -> {out_path_int}")
+
 
 
 def mark_cells_with_1_or_2(ws, col_index, fill):
@@ -805,20 +879,22 @@ def _tab8_int_value(v):
     return None
 
 
-def tab8_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: PatternFill):
+def tab8_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: PatternFill, include_n_always: bool=False, tag_suffix: str=""):
     """Summenprüfung für Tabelle 8 (_g) auf Blatt 1.
 
     Prüft:
       - Spalte E: Summe Zeilen 15..21 == Zeile 22
-      - nur wenn E abweicht: zusätzlich Spalten F..M (und bei JJ zusätzlich N)
+      - nur wenn E abweicht: zusätzlich Spalten F..M (und optional N)
     Korrigiert Abweichungen in Zeile 22 und markiert die geänderten Zellen gelb.
     """
     sum_rows = range(15, 22)  # 15..21
     target_row = 22
 
-    # Spalten: E..M (5..13), bei JJ zusätzlich N (14)
+    tag = f"[{tag_suffix}]" if tag_suffix else ""
+
+    # Spalten: E..M (5..13), optional zusätzlich N (14)
     cols = list(range(5, 14))
-    if kind == "jj":
+    if include_n_always or kind == "jj":
         cols.append(14)
 
     def col_letter(c):
@@ -844,17 +920,17 @@ def tab8_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: Patt
 
     # Wenn keine Werte gefunden wurden, trotzdem protokollieren (Layout / Daten prüfen)
     if not e_any and e_target is None:
-        logger.log("[TAB8][SUM] Blatt 1: Spalte E enthält keine summierbaren Werte (Zeilen 15..22).")
+        logger.log(f"[TAB8][SUM]{tag} Blatt 1: Spalte E enthält keine summierbaren Werte (Zeilen 15..22).")
         return
 
     if e_target == e_sum:
-        logger.log(f"[TAB8][SUM][OK] Blatt 1: E22 stimmt ({e_sum}).")
+        logger.log(f"[TAB8][SUM]{tag}[OK] Blatt 1: E22 stimmt ({e_sum}).")
         return
 
     # Abweichung: E korrigieren + markieren
     set_value_merge_safe(ws, target_row, 5, e_sum)
     ws.cell(row=target_row, column=5).fill = fill_changed
-    logger.log(f"[TAB8][SUM][KORR] Blatt 1: E22 war {e_target}, gesetzt auf {e_sum} (Summe E15:E21).")
+    logger.log(f"[TAB8][SUM]{tag}[KORR] Blatt 1: E22 war {e_target}, gesetzt auf {e_sum} (Summe E15:E21).")
 
     # C: Nur wenn E abweicht, die restlichen Spalten prüfen/korrigieren
     for c in cols:
@@ -863,14 +939,14 @@ def tab8_summenpruefung_blatt1(ws, kind: str, logger: Logger, fill_changed: Patt
         s, any_val = calc_sum(c)
         t = get_target(c)
         if not any_val and t is None:
-            logger.log(f"[TAB8][SUM][INFO] Blatt 1: {col_letter(c)} enthält keine summierbaren Werte (Zeilen 15..22).")
+            logger.log(f"[TAB8][SUM]{tag}[INFO] Blatt 1: {col_letter(c)} enthält keine summierbaren Werte (Zeilen 15..22).")
             continue
         if t == s:
-            logger.log(f"[TAB8][SUM][OK] Blatt 1: {col_letter(c)}22 stimmt ({s}).")
+            logger.log(f"[TAB8][SUM]{tag}[OK] Blatt 1: {col_letter(c)}22 stimmt ({s}).")
             continue
         set_value_merge_safe(ws, target_row, c, s)
         ws.cell(row=target_row, column=c).fill = fill_changed
-        logger.log(f"[TAB8][SUM][KORR] Blatt 1: {col_letter(c)}22 war {t}, gesetzt auf {s} (Summe {col_letter(c)}15:{col_letter(c)}21).")
+        logger.log(f"[TAB8][SUM]{tag}[KORR] Blatt 1: {col_letter(c)}22 war {t}, gesetzt auf {s} (Summe {col_letter(c)}15:{col_letter(c)}21).")
 
 
 def format_numeric_cells(ws, skip_cols=None):
