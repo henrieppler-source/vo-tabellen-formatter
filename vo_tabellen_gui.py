@@ -1500,7 +1500,7 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
 
     files = find_raw_files(input_dir)
     has_tab8 = bool(glob.glob(os.path.join(input_dir, "*_Tab8_*.xlsx")))
-    if not files and not has_tab8:
+    if not files and not (has_tab8 or has_tab9):
         logger.log(f"[INFO] Keine passenden Rohdateien gefunden in: {input_dir}")
         return
 
@@ -1548,16 +1548,14 @@ def run_for_one_input_dir(input_dir: str, base_out_dir: str, logger: Logger, sta
         logger.log(f"[TAB8][FEHLER] {e}")
         raise
 
+    # Tabelle 9 (_g/_INTERN): 29..32_Tab9_*.xlsx als Batch (4 Blätter in 1 Datei)
+    try:
+        logger.section("Erstelle Tabelle 9 (_g/_INTERN)")
+        process_tab9_in_dir(input_dir, out_dir, logger, status_var)
+    except Exception as e:
+        logger.log(f"[TAB9][FEHLER] {e}")
+        raise
 
-
-
-# Tabelle 9 (_g/_INTERN): 29..32_Tab9_*.xlsx als Batch (4 Blätter in 1 Datei)
-try:
-    logger.section("Erstelle Tabelle 9 (_g/_INTERN)")
-    process_tab9_in_dir(input_dir, out_dir, logger, status_var)
-except Exception as e:
-    logger.log(f"[TAB9][FEHLER] {e}")
-    raise
 
 def run_processing(monat_dir, quartal_dir, halbjahr_dir, jahr_dir, base_out_dir, logger: Logger, status_var: tk.StringVar):
     if not base_out_dir:
